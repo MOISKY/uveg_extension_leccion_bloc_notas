@@ -1,0 +1,38 @@
+{
+    "manifest_version": 3,
+    "name": "UVEG - Lecciones bloc de notas",
+    "version": "1.4.3",
+    "description": "Detecta, acumula y ordena automáticamente los recursos en el Campus Virtual UVEG con diseño azul institucional con 1 solo clic.",
+    "icons": {
+        "16": "img/icon-16.png",
+        "48": "img/icon-48.png",
+        "128": "img/icon-128.png"
+    },
+    "action": {
+        "default_icon": {
+            "16": "img/icon-16.png",
+            "48": "img/icon-48.png",
+            "128": "img/icon-128.png"
+        }
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://avalicmod19d.uveg.edu.mx/*",
+                "http://localhost/*",
+                "http://127.0.0.1/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "all_frames": false,
+            "run_at": "document_idle"
+        }
+    ],
+    "browser_specific_settings": {
+        "gecko": {
+            "id": "copiar-recursos-uveg@extension.local",
+            "strict_min_version": "109.0"
+        }
+    }
+}
