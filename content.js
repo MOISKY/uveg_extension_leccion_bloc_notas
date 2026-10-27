@@ -43,15 +43,18 @@
         try {
             const url = new URL(urlStr, window.location.href);
             const h = url.hostname.toLowerCase();
+            const p = url.pathname.toLowerCase();
             const esGenially = HOSTS_GENIALLY.some(base => h === base || h.endsWith('.' + base));
             if (esGenially) return true;
-            // También si es un recurso UVEG interno permitido
-            if (h === 'avalicmod19d.uveg.edu.mx' && /[?&]mainsection=[234]($|&)/i.test(url.search)) {
-                return true;
+            if (h.endsWith('uveg.edu.mx')) {
+                if (/[?&]mainsection=[234]($|&)/i.test(url.search)) return true;
+                if (p.includes('/mod/scorm/') || p.includes('/mod_scorm/')) return true;
+                if (p.includes('/mod_resource/') || p.includes('/mod/resource/') || p.endsWith('.pdf')) return true;
             }
         } catch {
-            if (/view.genial.ly|view.genially.com/i.test(urlStr)) return true;
-            if (/avalicmod19d.uveg.edu.mx.*[?&]mainsection=[234]/i.test(urlStr)) return true;
+            if (/view\.genial\.ly|view\.genially\.com/i.test(urlStr)) return true;
+            if (/mod\/scorm|mod_scorm|mod_resource|\.pdf/i.test(urlStr)) return true;
+            if (/avalicmod19d\.uveg\.edu\.mx.*[?&]mainsection=[234]/i.test(urlStr)) return true;
         }
         return false;
     }
@@ -169,11 +172,49 @@
         return SIN_TITULO;
     }
 
-    // Escanear los iframes del DOM
-    function encontrarIframesEnDocumento(doc = document) {
+    function extraerTituloElemento(el, contextDoc = document) {
+        if (el.tagName === 'IFRAME') {
+            return extraerTitulo(el, contextDoc);
+        }
+
+        try {
+            const contenedor = el.closest ? el.closest('.container-lesson, .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null;
+            if (contenedor) {
+                const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
+                if (tituloUveg) {
+                    const txt = (tituloUveg.innerText || tituloUveg.textContent || '').trim();
+                    if (txt.length > 2) return txt.replace(/\s+/g, ' ');
+                }
+
+                const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
+                if (header) {
+                    const copia = header.cloneNode(true);
+                    copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
+                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].trim();
+                    if (txt.length > 2) return txt.replace(/\s+/g, ' ');
+                }
+            }
+
+            const titleAttr = (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim();
+            if (titleAttr && !/^(genially|view|iframe|embedded|icono|imagen|recurso)$/i.test(titleAttr)) {
+                return titleAttr.replace(/\s+/g, ' ');
+            }
+
+            const inner = (el.innerText || el.textContent || '').trim();
+            if (inner && inner.length > 2 && inner.length < 200) {
+                return inner.replace(/\s+/g, ' ');
+            }
+        } catch {}
+
+        return SIN_TITULO;
+    }
+
+    // Escanear tanto iframes (Genially) como elementos con data-link (SCORM / PDF)
+    function encontrarLeccionesEnDocumento(doc = document) {
         const vistos = new Set();
         const encontrados = [];
 
+        // 1. Iframes (Genially)
         for (const iframe of doc.querySelectorAll('iframe')) {
             const src = iframe.getAttribute('src') || iframe.getAttribute('data-src') || iframe.src;
             if (!src || !esUrlRecurso(src) || vistos.has(src)) continue;
@@ -182,11 +223,57 @@
             const titulo = extraerTitulo(iframe, doc);
             encontrados.push({
                 titulo: titulo,
-                url: src
+                url: src,
+                tipo: 'genially'
+            });
+        }
+
+        // 2. Elementos con data-link, SCORM y PDFs
+        const selectores = [
+            '[data-link]',
+            'a[href*="/mod/scorm/"]',
+            'a[href*="/mod_scorm/"]',
+            'a[href*="/mod/resource/"]',
+            'a[href*="/mod_resource/"]',
+            'a[href*=".pdf"]',
+            '.container-lesson',
+            '.img-leccion'
+        ].join(', ');
+
+        for (const el of doc.querySelectorAll(selectores)) {
+            let rawUrl = el.getAttribute('data-link') || el.getAttribute('href');
+            if (!rawUrl && el.querySelector) {
+                const hijo = el.querySelector('[data-link], a[href*="mod/scorm"], a[href*=".pdf"]');
+                if (hijo) {
+                    rawUrl = hijo.getAttribute('data-link') || hijo.getAttribute('href');
+                }
+            }
+
+            if (!rawUrl || !esUrlRecurso(rawUrl) || vistos.has(rawUrl)) continue;
+
+            vistos.add(rawUrl);
+            const titulo = extraerTituloElemento(el, doc);
+            let tipo = 'recurso';
+            if (/mod\/scorm|mod_scorm/i.test(rawUrl)) {
+                tipo = 'scorm';
+            } else if (HOSTS_GENIALLY.some(b => rawUrl.includes(b))) {
+                tipo = 'genially';
+            } else if (/\.pdf|mod_resource/i.test(rawUrl)) {
+                tipo = 'pdf';
+            }
+
+            encontrados.push({
+                titulo: titulo,
+                url: rawUrl,
+                tipo: tipo
             });
         }
 
         return encontrados;
+    }
+
+    function encontrarIframesEnDocumento(doc = document) {
+        return encontrarLeccionesEnDocumento(doc);
     }
 
     // Recorrido interno en paralelo sin referencias textuales externas
@@ -499,6 +586,54 @@
         }
 
         /* Botón intuitivo de Copiar con Icono en Azul UVEG */
+        .item-acciones {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .btn-descargar-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 9px;
+            border-radius: 7px;
+            border: 1.5px solid #059669;
+            background: #ecfdf5;
+            color: #059669;
+            font-size: 11.5px;
+            font-weight: 700;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: all 0.15s ease;
+        }
+        .btn-descargar-item:hover {
+            background: #d1fae5;
+            border-color: #047857;
+            color: #047857;
+            transform: translateY(-1px);
+        }
+        .btn-descargar-item svg {
+            width: 13px;
+            height: 13px;
+            stroke: currentColor;
+            stroke-width: 2.2;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .btn-descargar-item.descargando {
+            opacity: 0.85;
+            pointer-events: none;
+            background: #fef3c7;
+            border-color: #d97706;
+            color: #b45309;
+        }
+        .btn-descargar-item.descargado-exito {
+            background: #059669;
+            border-color: #047857;
+            color: #ffffff;
+        }
         .btn-copiar-item {
             display: inline-flex;
             align-items: center;
@@ -698,6 +833,7 @@
 
     const SVG_COPIAR = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
     const SVG_CHECK = `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+    const SVG_DESCARGAR = `<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
 
     // Vista de espera mientras se obtienen los recursos
     function renderizarEstadoCarga() {
@@ -735,6 +871,196 @@
 
         contenedor.appendChild(cabecera);
         contenedor.appendChild(carga);
+    }
+
+    
+    // --- MOTOR ZIP AUTÓNOMO COMPATIBLE CON WINDOWS EXPLORER ---
+    const crcTable = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        crcTable[i] = c;
+    }
+    function calcCRC32(buf) {
+        let crc = 0xFFFFFFFF;
+        for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    class VanillaZipEngine {
+        constructor() { this.files = []; }
+        add(name, uint8) { this.files.push({ name: name.replace(/^\/+/, ''), data: uint8 }); }
+        buildBlob() {
+            const parts = [];
+            const central = [];
+            let offset = 0;
+            const enc = new TextEncoder();
+            const dosTime = 0x6000;
+            const dosDate = 0x58A1;
+
+            for (const f of this.files) {
+                const nb = enc.encode(f.name);
+                const crc = calcCRC32(f.data);
+                const size = f.data.length;
+
+                const h = new Uint8Array(30);
+                const hv = new DataView(h.buffer);
+                hv.setUint32(0, 0x04034b50, true);
+                hv.setUint16(4, 20, true);
+                hv.setUint16(6, 0x0800, true);
+                hv.setUint16(8, 0, true);
+                hv.setUint16(10, dosTime, true);
+                hv.setUint16(12, dosDate, true);
+                hv.setUint32(14, crc, true);
+                hv.setUint32(18, size, true);
+                hv.setUint32(22, size, true);
+                hv.setUint16(26, nb.length, true);
+                parts.push(h, nb, f.data);
+
+                const ch = new Uint8Array(46);
+                const chv = new DataView(ch.buffer);
+                chv.setUint32(0, 0x02014b50, true);
+                chv.setUint16(4, 20, true);
+                chv.setUint16(6, 20, true);
+                chv.setUint16(8, 0x0800, true);
+                chv.setUint16(10, 0, true);
+                chv.setUint16(12, dosTime, true);
+                chv.setUint16(14, dosDate, true);
+                chv.setUint32(16, crc, true);
+                chv.setUint32(20, size, true);
+                chv.setUint32(24, size, true);
+                chv.setUint16(28, nb.length, true);
+                chv.setUint32(38, 0x20, true); // Archive attribute para Windows
+                chv.setUint32(42, offset, true);
+
+                central.push(ch, nb);
+                offset += h.length + nb.length + size;
+            }
+
+            const cdOffset = offset;
+            let cdSize = 0;
+            for (const p of central) cdSize += p.length;
+
+            const eocd = new Uint8Array(22);
+            const ev = new DataView(eocd.buffer);
+            ev.setUint32(0, 0x06054b50, true);
+            ev.setUint16(8, this.files.length, true);
+            ev.setUint16(10, this.files.length, true);
+            ev.setUint32(12, cdSize, true);
+            ev.setUint32(16, cdOffset, true);
+
+            return new Blob([...parts, ...central, eocd], { type: 'application/zip' });
+        }
+    }
+
+    async function descargarLeccionScorm(item, btnElement) {
+        if (!btnElement || btnElement.classList.contains('descargando')) return;
+
+        btnElement.classList.add('descargando');
+        btnElement.innerHTML = `<span>Buscando...</span>`;
+
+        try {
+            let baseScorm = '';
+            // Si la URL es directa a mod_scorm/content:
+            const matchContent = item.url.match(/(https?:\/\/[^"']+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+            if (matchContent) {
+                baseScorm = matchContent[1];
+            } else {
+                // Si es un view.php, resolver loadSCO
+                const resView = await fetch(item.url, { credentials: 'same-origin' });
+                const htmlView = await resView.text();
+                const matchBase = htmlView.match(/(https?:\/\/[^"']+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+                if (matchBase) {
+                    baseScorm = matchBase[1];
+                } else {
+                    const matchSco = htmlView.match(/([a-zA-Z0-9_.-]*loadSCO\.php\?[^"']+)/i);
+                    if (matchSco) {
+                        const urlSco = new URL(matchSco[1], item.url).href;
+                        const resSco = await fetch(urlSco, { credentials: 'same-origin' });
+                        const htmlSco = await resSco.text();
+                        const matchFinal = htmlSco.match(/(https?:\/\/[^"']+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+                        if (matchFinal) baseScorm = matchFinal[1];
+                    }
+                }
+            }
+
+            if (!baseScorm) {
+                throw new Error('No se pudo localizar el paquete SCORM');
+            }
+
+            btnElement.innerHTML = `<span>Leyendo...</span>`;
+            const manifestRes = await fetch(baseScorm + 'imsmanifest.xml');
+            if (!manifestRes.ok) throw new Error('Error al leer imsmanifest.xml (' + manifestRes.status + ')');
+            const manifestXml = await manifestRes.text();
+
+            const listaArchivos = new Set();
+            listaArchivos.add('imsmanifest.xml');
+            listaArchivos.add('story.html');
+            listaArchivos.add('index.html');
+
+            let m;
+            const fileRegex = /<file\b[^>]*\bhref=["']([^"']+)["']/gi;
+            while ((m = fileRegex.exec(manifestXml)) !== null) {
+                if (m[1]) listaArchivos.add(m[1].trim());
+            }
+
+            const resRegex = /<resource\b[^>]*\bhref=["']([^"']+)["']/gi;
+            while ((m = resRegex.exec(manifestXml)) !== null) {
+                if (m[1]) listaArchivos.add(m[1].trim());
+            }
+
+            const arrayArchivos = Array.from(listaArchivos);
+            const zip = new VanillaZipEngine();
+            let completados = 0;
+
+            for (let i = 0; i < arrayArchivos.length; i++) {
+                const ruta = arrayArchivos[i];
+                try {
+                    const res = await fetch(baseScorm + ruta);
+                    if (res.ok) {
+                        const buf = await res.arrayBuffer();
+                        zip.add(ruta, new Uint8Array(buf));
+                        completados++;
+                        if (completados % 10 === 0 || completados === arrayArchivos.length) {
+                            const pct = Math.round((completados / arrayArchivos.length) * 100);
+                            btnElement.innerHTML = `<span>${pct}%</span>`;
+                        }
+                    }
+                } catch {}
+            }
+
+            btnElement.innerHTML = `<span>Empacando...</span>`;
+            const blob = zip.buildBlob();
+
+            const slug = (item.titulo || 'leccion')
+                .replace(/[^a-zA-Z0-9_-]/g, '_')
+                .replace(/_+/g, '_')
+                .substring(0, 40);
+
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `Leccion_${slug}_Offline.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            btnElement.classList.remove('descargando');
+            btnElement.classList.add('descargado-exito');
+            btnElement.innerHTML = `${SVG_CHECK}<span>¡Listo!</span>`;
+
+            setTimeout(() => {
+                btnElement.classList.remove('descargado-exito');
+                btnElement.innerHTML = `${SVG_DESCARGAR}<span>Descargar</span>`;
+            }, 3500);
+
+        } catch (err) {
+            console.error('[UVEG Bloc Notas] Error al descargar SCORM:', err);
+            btnElement.classList.remove('descargando');
+            btnElement.innerHTML = `<span>Error</span>`;
+            setTimeout(() => {
+                btnElement.innerHTML = `${SVG_DESCARGAR}<span>Descargar</span>`;
+            }, 3000);
+        }
     }
 
     function renderizar(items) {
@@ -835,14 +1161,34 @@
             tituloEl.className = 'item-titulo';
             tituloEl.textContent = item.titulo;
 
+            // Contenedor de acciones en la tarjeta
+            const accionesEl = document.createElement('div');
+            accionesEl.className = 'item-acciones';
+
+            // Botón selectivo: Únicamente para lecciones de tipo SCORM
+            const esScorm = item.tipo === 'scorm' || /mod\/scorm|mod_scorm/i.test(item.url);
+            if (esScorm) {
+                const btnDescargar = document.createElement('button');
+                btnDescargar.type = 'button';
+                btnDescargar.className = 'btn-descargar-item';
+                btnDescargar.innerHTML = `${SVG_DESCARGAR}<span>Descargar</span>`;
+                btnDescargar.title = 'Descargar lección interactiva offline (.zip)';
+                btnDescargar.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    descargarLeccionScorm(item, btnDescargar);
+                });
+                accionesEl.appendChild(btnDescargar);
+            }
+
             // Botón intuitivo "Copiar" con icono en azul UVEG
             const btnCopiar = document.createElement('button');
             btnCopiar.type = 'button';
             btnCopiar.className = 'btn-copiar-item';
             btnCopiar.innerHTML = `${SVG_COPIAR}<span>Copiar</span>`;
 
+            accionesEl.appendChild(btnCopiar);
             tarjeta.appendChild(tituloEl);
-            tarjeta.appendChild(btnCopiar);
+            tarjeta.appendChild(accionesEl);
 
             const ejecutarCopia = async (e) => {
                 if (e) e.stopPropagation();
