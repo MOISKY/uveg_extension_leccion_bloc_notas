@@ -6,9 +6,14 @@
     }
     window.__uveg_extension_iniciada = true;
 
-    // 1. Dominio permitido: avalicmod19d.uveg.edu.mx (o localhost / 127.0.0.1 / file: para pruebas locales)
+    // Evitar ejecución dentro de iframes
+    if (window.top !== window.self) {
+        return;
+    }
+
+    // 1. Dominio permitido: *.uveg.edu.mx (o localhost / 127.0.0.1 / file: para pruebas locales)
     const hostname = window.location.hostname.toLowerCase();
-    const esDominioValido = hostname === 'avalicmod19d.uveg.edu.mx' ||
+    const esDominioValido = hostname.endsWith('uveg.edu.mx') ||
                             hostname === 'localhost' ||
                             hostname === '127.0.0.1' ||
                             window.location.protocol === 'file:';
@@ -17,10 +22,16 @@
         return;
     }
 
+    // Evitar ejecución dentro de páginas internas del reproductor SCORM
+    if (/\/mod\/scorm\/|\/mod_scorm\//i.test(window.location.pathname)) {
+        return;
+    }
+
     const ID_HOST = 'uveg-copiar-recursos-host';
     const SIN_TITULO = '(sin título)';
     const ESPERA_REVISION_MS = 350;
     const DURACION_AVISO_MS = 1800;
+    const REGEX_CODIGO_LECCION = /(?:LEC[_-]?L|[A-Z0-9]+_L|_L|L[_-]|LECCION[_-]?\s*|\bL)[_-]?0*(\d+)(?!\d)/i;
 
     let host = null;
     let contenedor = null;
@@ -38,23 +49,80 @@
     // Dominios o patrones de recursos (Genially, UVEG interactivo, etc.)
     const HOSTS_GENIALLY = ['view.genial.ly', 'view.genially.com', 'genial.ly', 'genially.com'];
 
-    function esUrlRecurso(urlStr) {
+    function esUrlGenially(urlStr) {
         if (!urlStr) return false;
         try {
             const url = new URL(urlStr, window.location.href);
             const h = url.hostname.toLowerCase();
+            return HOSTS_GENIALLY.some(base => h === base || h.endsWith('.' + base));
+        } catch {
+            return /view\.genial\.ly|view\.genially\.com/i.test(urlStr);
+        }
+    }
+
+    function esUrlPdfDirecto(urlStr) {
+        if (!urlStr) return false;
+        return /\.pdf(?:[?#]|$)/i.test(String(urlStr).trim());
+    }
+
+    function extraerNombreArchivoPdf(urlStr) {
+        if (!urlStr) return null;
+        try {
+            const u = new URL(urlStr, window.location.origin);
+            const partes = u.pathname.split('/').filter(Boolean);
+            const ultimo = partes.length > 0 ? decodeURIComponent(partes[partes.length - 1]) : '';
+            if (/\.pdf$/i.test(ultimo)) {
+                return ultimo;
+            }
+        } catch {}
+        const m = String(urlStr).match(/\/([^/?#]+\.pdf)(?:[?#]|$)/i);
+        if (m) {
+            try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+        }
+        return null;
+    }
+
+    function extraerNumeroLeccion(texto) {
+        if (!texto) return null;
+        const m = String(texto).match(REGEX_CODIGO_LECCION);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    function normalizarUrl(urlStr) {
+        if (!urlStr) return '';
+        try {
+            let u = new URL(urlStr, window.location.href);
+            let h = u.hostname.toLowerCase();
+            if (HOSTS_GENIALLY.some(base => h === base || h.endsWith('.' + base))) {
+                h = 'view.genial.ly';
+            }
+            let p = u.pathname.replace(/\/+$/, '');
+            const matchIdGenially = p.match(/([a-f0-9]{24})/i);
+            if (matchIdGenially) {
+                return `https://view.genial.ly/${matchIdGenially[1].toLowerCase()}`;
+            }
+            if (u.searchParams && u.searchParams.has('id')) {
+                return `${u.protocol}//${h}${p}?id=${u.searchParams.get('id')}`.toLowerCase();
+            }
+            return `${u.protocol}//${h}${p}`.toLowerCase();
+        } catch {
+            return urlStr.trim().toLowerCase().replace(/\/+$/, '');
+        }
+    }
+
+    function esUrlRecurso(urlStr) {
+        if (!urlStr) return false;
+        if (esUrlGenially(urlStr)) return true;
+        try {
+            const url = new URL(urlStr, window.location.href);
+            const h = url.hostname.toLowerCase();
             const p = url.pathname.toLowerCase();
-            const esGenially = HOSTS_GENIALLY.some(base => h === base || h.endsWith('.' + base));
-            if (esGenially) return true;
             if (h.endsWith('uveg.edu.mx')) {
-                if (/[?&]mainsection=[234]($|&)/i.test(url.search)) return true;
                 if (p.includes('/mod/scorm/') || p.includes('/mod_scorm/')) return true;
                 if (p.includes('/mod_resource/') || p.includes('/mod/resource/') || p.endsWith('.pdf')) return true;
             }
         } catch {
-            if (/view\.genial\.ly|view\.genially\.com/i.test(urlStr)) return true;
-            if (/mod\/scorm|mod_scorm|mod_resource|\.pdf/i.test(urlStr)) return true;
-            if (/avalicmod19d\.uveg\.edu\.mx.*[?&]mainsection=[234]/i.test(urlStr)) return true;
+            if (/mod\/scorm|mod_scorm|mod\/resource|mod_resource|\.pdf/i.test(urlStr)) return true;
         }
         return false;
     }
@@ -70,6 +138,9 @@
     function obtenerIdCurso() {
         const match = window.location.href.match(/[?&]id=(\d+)($|&)/i);
         if (match) return match[1];
+        if (esUrlPdfDirecto(window.location.href)) {
+            return 'pdf_' + (extraerNombreArchivoPdf(window.location.href) || 'doc');
+        }
         if (hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
             return 'demo';
         }
@@ -108,9 +179,12 @@
         return window.location.pathname.toLowerCase().includes('/course/view.php') && obtenerIdCurso() !== null;
     }
 
-    // Comprobar internamente si corresponde a la vista del curso
+    // Comprobar internamente si corresponde a la vista del curso o a un PDF directo de UVEG
     function seccionEsPermitida(itemsEncontrados = []) {
         if (hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+            return true;
+        }
+        if (esUrlPdfDirecto(window.location.href)) {
             return true;
         }
         if (esPaginaCurso()) {
@@ -119,20 +193,68 @@
         if (obtenerSeccionActual() !== null) {
             return true;
         }
-        if (itemsEncontrados.some(it => /[?&]mainsection=[234]($|&)/i.test(it.url))) {
+        if (itemsEncontrados.length > 0) {
             return true;
         }
         return false;
     }
 
-    // Algoritmo de ordenamiento natural por título (L1, L2, L3... Reto 1, Reto 2...)
+    // Algoritmo de ordenamiento natural por número de lección (L1, L2, L3... L12) y título
     function ordenarPorTitulo(items) {
-        return items.slice().sort((a, b) => {
+        const vistosUrl = new Set();
+        const porClave = new Map();
+        const sinNumero = [];
+
+        for (const it of items) {
+            const norm = normalizarUrl(it.url);
+            if (vistosUrl.has(norm)) continue;
+            vistosUrl.add(norm);
+
+            const num = it.numero ?? extraerNumeroLeccion(it.titulo);
+            if (num !== null && num !== 999) {
+                const esPdf = it.tipo === 'pdf' || esUrlPdfDirecto(it.url);
+                const clave = esPdf ? `${num}_pdf_${it.titulo}` : `${num}_main`;
+                const existente = porClave.get(clave);
+                if (!existente || (it.tipo === 'genially' && existente.tipo !== 'genially')) {
+                    porClave.set(clave, { ...it, numero: num });
+                }
+            } else {
+                sinNumero.push({ ...it, numero: 999 });
+            }
+        }
+
+        const conNumero = Array.from(porClave.values()).sort((a, b) => {
+            if (a.numero !== b.numero) return a.numero - b.numero;
+            if (a.tipo !== 'pdf' && b.tipo === 'pdf') return -1;
+            if (a.tipo === 'pdf' && b.tipo !== 'pdf') return 1;
             return a.titulo.localeCompare(b.titulo, undefined, { numeric: true, sensitivity: 'base' });
         });
+
+        sinNumero.sort((a, b) => a.titulo.localeCompare(b.titulo, undefined, { numeric: true, sensitivity: 'base' }));
+        return [...conNumero, ...sinNumero];
     }
 
-    // Extraer título limpio del iframe o de su contenedor Moodle
+    // --- EXTRACCIÓN DE TÍTULOS Y CÓDIGOS (%L%, LEC_L1, CPFI_L4, L3_Comic.pdf) ---
+
+    function extraerIdContenedorLeccion(el) {
+        if (!el) return '';
+        try {
+            let actual = el;
+            while (actual && actual !== document.body && actual !== document.documentElement) {
+                const idAttr = (actual.getAttribute && actual.getAttribute('id')) || actual.id || '';
+                if (idAttr && REGEX_CODIGO_LECCION.test(idAttr) && !/^module-/i.test(idAttr)) {
+                    return idAttr.trim();
+                }
+                const dataLesson = actual.getAttribute ? (actual.getAttribute('data-lesson') || actual.getAttribute('data-leccion') || '') : '';
+                if (dataLesson && REGEX_CODIGO_LECCION.test(dataLesson)) {
+                    return dataLesson.trim();
+                }
+                actual = actual.parentElement;
+            }
+        } catch {}
+        return '';
+    }
+
     function extraerTitulo(iframe, contextDoc = document) {
         const titleAttr = (iframe.getAttribute('title') || '').trim();
         const ariaAttr = (iframe.getAttribute('aria-label') || '').trim();
@@ -145,25 +267,19 @@
             return ariaAttr;
         }
 
+        const idContenedor = extraerIdContenedorLeccion(iframe);
+        if (idContenedor) return idContenedor;
+
         try {
-            const actividad = iframe.closest ? iframe.closest('.activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null;
+            const actividad = iframe.closest ? iframe.closest('.container-lesson, .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null;
             if (actividad) {
                 const header = actividad.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
                 if (header) {
-                    const textoLimpio = header.innerText ? header.innerText.split('\n')[0].replace(/\s+/g, ' ').trim() : header.textContent.split('\n')[0].replace(/\s+/g, ' ').trim();
+                    const textoLimpio = (header.innerText || header.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
                     if (textoLimpio.length > 2) {
                         return textoLimpio;
                     }
                 }
-            }
-
-            let prev = iframe.previousElementSibling;
-            while (prev) {
-                if (/^H[1-6]$/i.test(prev.tagName) || (prev.classList && (prev.classList.contains('title') || prev.classList.contains('instancename')))) {
-                    const texto = (prev.innerText || prev.textContent || '').trim();
-                    if (texto) return texto;
-                }
-                prev = prev.previousElementSibling;
             }
         } catch {}
 
@@ -172,26 +288,49 @@
         return SIN_TITULO;
     }
 
-    function extraerTituloElemento(el, contextDoc = document) {
+    function extraerTituloElemento(el, contextDoc = document, contenedorExplicito = null, rawUrl = '') {
+        if (!el) return SIN_TITULO;
         if (el.tagName === 'IFRAME') {
             return extraerTitulo(el, contextDoc);
         }
 
         try {
-            const contenedor = el.closest ? el.closest('.container-lesson, .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null;
+            const contenedor = contenedorExplicito || (el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"], .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null);
             if (contenedor) {
                 const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
                 if (tituloUveg) {
-                    const txt = (tituloUveg.innerText || tituloUveg.textContent || '').trim();
-                    if (txt.length > 2) return txt.replace(/\s+/g, ' ');
+                    const txt = (tituloUveg.innerText || tituloUveg.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
+                        return txt;
+                    }
+                }
+
+                // Si el contenedor tiene un ID de lección tipo id="LEC_L1", usarlo directamente
+                const idCont = (contenedor.getAttribute && contenedor.getAttribute('id')) || contenedor.id || '';
+                if (idCont && REGEX_CODIGO_LECCION.test(idCont) && !/^module-/i.test(idCont)) {
+                    return idCont.trim();
                 }
 
                 const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
                 if (header) {
                     const copia = header.cloneNode(true);
                     copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
-                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].trim();
-                    if (txt.length > 2) return txt.replace(/\s+/g, ' ');
+                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
+                    if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
+                        return txt;
+                    }
+                }
+            }
+
+            const idAncestro = extraerIdContenedorLeccion(el);
+            if (idAncestro) {
+                return idAncestro;
+            }
+
+            if (rawUrl && esUrlPdfDirecto(rawUrl)) {
+                const nomPdf = extraerNombreArchivoPdf(rawUrl);
+                if (nomPdf) {
+                    return nomPdf.replace(/\.pdf$/i, '').trim();
                 }
             }
 
@@ -199,73 +338,236 @@
             if (titleAttr && !/^(genially|view|iframe|embedded|icono|imagen|recurso)$/i.test(titleAttr)) {
                 return titleAttr.replace(/\s+/g, ' ');
             }
-
-            const inner = (el.innerText || el.textContent || '').trim();
-            if (inner && inner.length > 2 && inner.length < 200) {
-                return inner.replace(/\s+/g, ' ');
-            }
         } catch {}
 
         return SIN_TITULO;
     }
 
-    // Escanear tanto iframes (Genially) como elementos con data-link (SCORM / PDF)
-    function encontrarLeccionesEnDocumento(doc = document) {
-        const vistos = new Set();
-        const encontrados = [];
+    function extraerElementoYUrlDeContenedor(cont) {
+        if (!cont || !cont.querySelector) return null;
 
-        // 1. Iframes (Genially)
-        for (const iframe of doc.querySelectorAll('iframe')) {
-            const src = iframe.getAttribute('src') || iframe.getAttribute('data-src') || iframe.src;
-            if (!src || !esUrlRecurso(src) || vistos.has(src)) continue;
-
-            vistos.add(src);
-            const titulo = extraerTitulo(iframe, doc);
-            encontrados.push({
-                titulo: titulo,
-                url: src,
-                tipo: 'genially'
-            });
+        // 1. Priorizar imagen .img-leccion (con data-link directo o envuelta en un <a>)
+        const imgLeccion = cont.querySelector('.img-leccion');
+        if (imgLeccion) {
+            const dl = imgLeccion.getAttribute('data-link') || imgLeccion.getAttribute('href');
+            if (dl && esUrlRecurso(dl)) {
+                return { el: imgLeccion, rawAttr: dl };
+            }
+            const linkPadre = imgLeccion.closest ? imgLeccion.closest('a[href], [data-link]') : null;
+            if (linkPadre && cont.contains(linkPadre)) {
+                const attrPadre = linkPadre.getAttribute('data-link') || linkPadre.getAttribute('href');
+                if (attrPadre && esUrlRecurso(attrPadre)) {
+                    return { el: linkPadre, rawAttr: attrPadre };
+                }
+            }
+            const onclickImg = imgLeccion.getAttribute('onclick') || '';
+            const mOnclick = onclickImg.match(/['"](https?:\/\/[^'"]+|\/[^'"]+)['"]/i);
+            if (mOnclick && esUrlRecurso(mOnclick[1])) {
+                return { el: imgLeccion, rawAttr: mOnclick[1] };
+            }
         }
 
-        // 2. Elementos con data-link, SCORM y PDFs
+        // 2. Buscar selectores de lección SCORM, mod/resource o PDF dentro del contenedor
         const selectores = [
-            '[data-link]',
+            '.img-leccion[data-link]',
+            '.img-leccion [data-link]',
+            '[data-link*="/mod/scorm/"]',
+            '[data-link*="/mod_scorm/"]',
+            '[data-link*="/mod/resource/"]',
+            '[data-link*="/mod_resource/"]',
+            '[data-link*=".pdf"]',
             'a[href*="/mod/scorm/"]',
             'a[href*="/mod_scorm/"]',
             'a[href*="/mod/resource/"]',
             'a[href*="/mod_resource/"]',
             'a[href*=".pdf"]',
-            '.container-lesson',
-            '.img-leccion'
-        ].join(', ');
+            '[data-link]'
+        ];
 
-        for (const el of doc.querySelectorAll(selectores)) {
-            let rawUrl = el.getAttribute('data-link') || el.getAttribute('href');
-            if (!rawUrl && el.querySelector) {
-                const hijo = el.querySelector('[data-link], a[href*="mod/scorm"], a[href*=".pdf"]');
-                if (hijo) {
-                    rawUrl = hijo.getAttribute('data-link') || hijo.getAttribute('href');
+        for (const sel of selectores) {
+            const candidato = cont.querySelector(sel);
+            if (candidato) {
+                const raw = candidato.getAttribute('data-link') || candidato.getAttribute('href');
+                if (raw && esUrlRecurso(raw)) {
+                    return { el: candidato, rawAttr: raw };
                 }
             }
+        }
 
-            if (!rawUrl || !esUrlRecurso(rawUrl) || vistos.has(rawUrl)) continue;
+        const propioAttr = cont.getAttribute ? (cont.getAttribute('data-link') || cont.getAttribute('href')) : null;
+        if (propioAttr && esUrlRecurso(propioAttr)) {
+            return { el: cont, rawAttr: propioAttr };
+        }
 
-            vistos.add(rawUrl);
-            const titulo = extraerTituloElemento(el, doc);
-            let tipo = 'recurso';
-            if (/mod\/scorm|mod_scorm/i.test(rawUrl)) {
-                tipo = 'scorm';
-            } else if (HOSTS_GENIALLY.some(b => rawUrl.includes(b))) {
-                tipo = 'genially';
-            } else if (/\.pdf|mod_resource/i.test(rawUrl)) {
-                tipo = 'pdf';
+        return null;
+    }
+
+    function determinarTipoRecurso(urlStr) {
+        if (!urlStr) return 'recurso';
+        if (esUrlGenially(urlStr)) return 'genially';
+        if (esUrlPdfDirecto(urlStr) || /\/mod\/resource\/|\/mod_resource\//i.test(urlStr)) return 'pdf';
+        if (/\/mod\/scorm\/|\/mod_scorm\//i.test(urlStr)) return 'scorm';
+        return 'recurso';
+    }
+
+    // Escanear tanto iframes (Genially) como contenedores de lección (SCORM / PDF)
+    function encontrarLeccionesEnDocumento(doc = document) {
+        const vistos = new Set();
+        const encontrados = [];
+        const contenedoresConGenially = new Set();
+        const numerosConGenially = new Set();
+
+        // 0. Si el navegador dio un salto directo a un archivo PDF de UVEG (ej. .../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf)
+        if (doc === document && esUrlPdfDirecto(window.location.href)) {
+            const nombrePdf = extraerNombreArchivoPdf(window.location.href) || 'Documento.pdf';
+            const tituloPdf = nombrePdf.replace(/\.pdf$/i, '').trim() || 'Documento_PDF';
+            const numPdf = extraerNumeroLeccion(tituloPdf);
+            return [{
+                titulo: tituloPdf,
+                url: window.location.href,
+                tipo: 'pdf',
+                numero: numPdf !== null ? numPdf : 999
+            }];
+        }
+
+        // 1. Rastreo de Iframes de Genially (CPFI_L4, CPFI_L6, CPFI_L8, CPFI_L9, CPFI_L12)
+        for (const iframe of doc.querySelectorAll('iframe')) {
+            const rawSrc = iframe.getAttribute('src') || iframe.getAttribute('data-src') || iframe.src;
+            if (!rawSrc || !esUrlGenially(rawSrc)) continue;
+
+            let src = rawSrc;
+            try { src = new URL(rawSrc, window.location.href).href; } catch {}
+
+            const titulo = extraerTitulo(iframe, doc);
+            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+
+            const urlNorm = normalizarUrl(src);
+            if (vistos.has(urlNorm)) continue;
+            vistos.add(urlNorm);
+
+            const contPadre = iframe.closest ? iframe.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null;
+            if (contPadre) {
+                contenedoresConGenially.add(contPadre);
+                const numCont = extraerNumeroLeccion(contPadre.id);
+                if (numCont !== null) numerosConGenially.add(numCont);
+            }
+
+            const numTitulo = extraerNumeroLeccion(titulo);
+            if (numTitulo !== null) {
+                numerosConGenially.add(numTitulo);
             }
 
             encontrados.push({
                 titulo: titulo,
+                url: src,
+                tipo: 'genially',
+                numero: numTitulo !== null ? numTitulo : 999
+            });
+        }
+
+        // 2. Rastreo de contenedores de lección (.container-lesson, #LEC_L1..#LEC_L12) que NO están en Genially
+        const contenedoresProcesados = new Set();
+        const contenedores = doc.querySelectorAll('.container-lesson, [id^="LEC_L"], [id^="lec_l"]');
+
+        for (const cont of contenedores) {
+            contenedoresProcesados.add(cont);
+
+            if (contenedoresConGenially.has(cont)) continue;
+            if (cont.querySelector && cont.querySelector('iframe[src*="genial"]')) continue;
+
+            const numLeccion = extraerNumeroLeccion(cont.id || '');
+            if (numLeccion !== null && numerosConGenially.has(numLeccion)) continue;
+
+            const infoEl = extraerElementoYUrlDeContenedor(cont);
+            if (!infoEl) continue;
+
+            let rawUrl = infoEl.rawAttr;
+            try { rawUrl = new URL(infoEl.rawAttr, window.location.href).href; } catch {}
+
+            const titulo = extraerTituloElemento(infoEl.el, doc, cont, rawUrl);
+            if (!titulo || titulo === SIN_TITULO) continue;
+            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+
+            const urlNorm = normalizarUrl(rawUrl);
+            if (vistos.has(urlNorm)) continue;
+            vistos.add(urlNorm);
+
+            const num = numLeccion !== null ? numLeccion : (extraerNumeroLeccion(titulo) ?? 999);
+            encontrados.push({
+                titulo: titulo,
                 url: rawUrl,
-                tipo: tipo
+                tipo: determinarTipoRecurso(rawUrl),
+                numero: num
+            });
+        }
+
+        // 3. Respaldo para elementos .img-leccion, enlaces PDF de lección (ej. L3_Comic.pdf) o mod/resource
+        const selectorRespaldo = [
+            '.img-leccion[data-link]',
+            '[data-link*="/mod/scorm/"]',
+            '[data-link*="/mod_scorm/"]',
+            '[data-link*="/mod/resource/"]',
+            '[data-link*="/mod_resource/"]',
+            '[data-link*=".pdf"]',
+            'a[href*="/mod/resource/"]',
+            'a[href*="/mod_resource/"]',
+            'a[href*=".pdf"]'
+        ].join(', ');
+
+        for (const el of doc.querySelectorAll(selectorRespaldo)) {
+            const padreCont = el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null;
+            if (padreCont && contenedoresProcesados.has(padreCont)) continue;
+
+            const rawAttr = el.getAttribute('data-link') || el.getAttribute('href');
+            if (!rawAttr || !esUrlRecurso(rawAttr)) continue;
+
+            let rawUrl = rawAttr;
+            try { rawUrl = new URL(rawAttr, window.location.href).href; } catch {}
+
+            const urlNorm = normalizarUrl(rawUrl);
+            if (vistos.has(urlNorm)) continue;
+
+            let titulo = extraerTituloElemento(el, doc, padreCont, rawUrl);
+            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+
+            const esPdfDirecto = esUrlPdfDirecto(rawUrl);
+            const esModRes = /\/mod\/resource\/|\/mod_resource\//i.test(rawUrl);
+
+            if (!padreCont) {
+                if (esPdfDirecto) {
+                    const nomPdf = extraerNombreArchivoPdf(rawUrl) || '';
+                    if (!REGEX_CODIGO_LECCION.test(nomPdf) && !REGEX_CODIGO_LECCION.test(titulo)) {
+                        continue;
+                    }
+                    if (!titulo || titulo === SIN_TITULO) {
+                        titulo = nomPdf.replace(/\.pdf$/i, '');
+                    }
+                } else if (esModRes) {
+                    vistos.add(urlNorm);
+                    encontrados.push({
+                        titulo: titulo,
+                        url: rawUrl,
+                        tipo: 'pdf',
+                        numero: extraerNumeroLeccion(titulo) ?? 999,
+                        requiereValidarSaltoPdf: true
+                    });
+                    continue;
+                } else if (!el.classList || !el.classList.contains('img-leccion')) {
+                    continue;
+                }
+            }
+
+            if (!titulo || titulo === SIN_TITULO) continue;
+
+            const num = extraerNumeroLeccion(titulo);
+            if (num !== null && numerosConGenially.has(num) && !esPdfDirecto && !esModRes) continue;
+
+            vistos.add(urlNorm);
+            encontrados.push({
+                titulo: titulo,
+                url: rawUrl,
+                tipo: determinarTipoRecurso(rawUrl),
+                numero: num !== null ? num : 999
             });
         }
 
@@ -276,8 +578,348 @@
         return encontrarLeccionesEnDocumento(doc);
     }
 
-    // Recorrido interno en paralelo sin referencias textuales externas
-    async function escanearTodasLasSecciones(courseId, seccionActual) {
+    // --- RESOLUCIÓN PROFUNDA DE DESTINOS SCORM Y SALTOS A PDF (COMO L3_Comic.pdf) ---
+
+    function extraerRutaContent(texto) {
+        if (!texto) return null;
+        let limpio = String(texto).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+        try {
+            if (/%2F/i.test(limpio)) {
+                limpio += ' ' + decodeURIComponent(limpio);
+            }
+        } catch {}
+
+        const match = limpio.match(/(https?:\/\/[^"'\s<>]+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+        if (match) return match[1];
+
+        const matchRel = limpio.match(/(\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+        if (matchRel) {
+            try {
+                return new URL(matchRel[1], window.location.origin).href;
+            } catch {}
+        }
+        return null;
+    }
+
+    function extraerUrlPdfDesdeTexto(texto, baseUrl = window.location.origin) {
+        if (!texto) return null;
+        let limpio = String(texto).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+        try {
+            if (/%2F/i.test(limpio)) {
+                limpio += ' ' + decodeURIComponent(limpio);
+            }
+        } catch {}
+
+        const matchAbs = limpio.match(/(https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?)/i);
+        if (matchAbs) return matchAbs[1];
+
+        const matchRel = limpio.match(/(\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?)/i);
+        if (matchRel) {
+            try {
+                return new URL(matchRel[1], baseUrl).href;
+            } catch {}
+        }
+        return null;
+    }
+
+    function extraerUrlLoadSco(html, baseUrl) {
+        if (!html) return null;
+        try {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const el = doc.querySelector('iframe[src*="loadSCO.php"], #scorm_object[src], object[data*="loadSCO.php"], a[href*="loadSCO.php"]');
+            if (el) {
+                const raw = el.getAttribute('src') || el.getAttribute('data') || el.getAttribute('href');
+                if (raw) return new URL(raw.replace(/&amp;/gi, '&'), baseUrl).href;
+            }
+        } catch {}
+
+        const limpio = String(html).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+        const matchSco = limpio.match(/((?:https?:\/\/[^"'\s<>]+|[a-zA-Z0-9_./:-]*)\bloadSCO\.php\?[^"'\s<>]+)/i);
+        if (matchSco) {
+            try {
+                return new URL(matchSco[1], baseUrl).href;
+            } catch {}
+        }
+        return null;
+    }
+
+    function extraerParametrosScorm(html, pageUrl, previo = {}) {
+        const out = {
+            cmId: previo.cmId || '',
+            aId: previo.aId || '',
+            scoid: previo.scoid || '',
+            currentorg: previo.currentorg || '',
+            mode: previo.mode || '',
+            attempt: previo.attempt || '1'
+        };
+
+        if (pageUrl) {
+            try {
+                const u = new URL(pageUrl, window.location.origin);
+                if (u.searchParams.get('id') && /view\.php/i.test(u.pathname)) out.cmId = out.cmId || u.searchParams.get('id');
+                if (u.searchParams.get('cm')) out.cmId = u.searchParams.get('cm');
+                if (u.searchParams.get('a')) out.aId = u.searchParams.get('a');
+                if (u.searchParams.get('scoid')) out.scoid = u.searchParams.get('scoid');
+                if (u.searchParams.get('currentorg')) out.currentorg = u.searchParams.get('currentorg');
+            } catch {}
+        }
+
+        if (!html) return out;
+        const limpio = String(html).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+
+        try {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            for (const input of doc.querySelectorAll('input[name], select[name]')) {
+                const name = (input.getAttribute('name') || '').toLowerCase();
+                const type = (input.getAttribute('type') || '').toLowerCase();
+                if ((type === 'radio' || type === 'checkbox') && !input.checked && !input.hasAttribute('checked')) continue;
+                const val = (input.value || input.getAttribute('value') || '').trim();
+                if (!val) continue;
+                if (name === 'cm' || name === 'id') out.cmId = out.cmId || val;
+                if (name === 'a') out.aId = out.aId || val;
+                if (name === 'scoid') out.scoid = out.scoid || val;
+                if (name === 'currentorg') out.currentorg = out.currentorg || val;
+                if (name === 'mode') out.mode = out.mode || val;
+                if (name === 'attempt') out.attempt = out.attempt || val;
+            }
+        } catch {}
+
+        const mScoid = limpio.match(/[?&]scoid=(\d+)/i) || limpio.match(/["']scoid["']\s*[:=,]\s*["']?(\d+)/i);
+        if (mScoid && !out.scoid) out.scoid = mScoid[1];
+
+        const mCm = limpio.match(/[?&]cm=(\d+)/i);
+        if (mCm && !out.cmId) out.cmId = mCm[1];
+
+        const mA = limpio.match(/[?&]a=(\d+)/i);
+        if (mA && !out.aId) out.aId = mA[1];
+
+        const mOrg = limpio.match(/[?&]currentorg=([^&"'\s<>]+)/i);
+        if (mOrg && !out.currentorg) {
+            try { out.currentorg = decodeURIComponent(mOrg[1]); } catch { out.currentorg = mOrg[1]; }
+        }
+
+        const mInit = limpio.match(/M\.mod_scorm\.init\s*\(([\s\S]*?)\)/i);
+        if (mInit) {
+            const argsStr = mInit[1];
+            const mPar = argsStr.match(/["']?(\d+)["']?\s*,\s*["']?(\d+)["']?\s*,\s*["']([^"']*)["']/);
+            if (mPar) {
+                if (!out.aId) out.aId = mPar[1];
+                if (!out.scoid) out.scoid = mPar[2];
+                if (!out.currentorg && mPar[3]) out.currentorg = mPar[3];
+            }
+        }
+
+        return out;
+    }
+
+    async function probarLoadSco(urlSco) {
+        if (!urlSco) return null;
+        try {
+            const resSco = await fetch(urlSco, { credentials: 'include' });
+            if (esUrlPdfDirecto(resSco.url)) {
+                return { tipo: 'pdf', url: resSco.url };
+            }
+            const desdeUrl = extraerRutaContent(resSco.url);
+            if (desdeUrl) return { tipo: 'scorm', url: desdeUrl };
+
+            if (resSco.ok) {
+                const cType = (resSco.headers.get('content-type') || '').toLowerCase();
+                if (cType.includes('application/pdf')) {
+                    return { tipo: 'pdf', url: resSco.url || urlSco };
+                }
+                const htmlSco = await resSco.text();
+                const pdfEnHtml = extraerUrlPdfDesdeTexto(htmlSco, resSco.url || urlSco);
+                if (pdfEnHtml) return { tipo: 'pdf', url: pdfEnHtml };
+
+                const desdeHtml = extraerRutaContent(htmlSco);
+                if (desdeHtml) return { tipo: 'scorm', url: desdeHtml };
+            }
+        } catch {}
+        return null;
+    }
+
+    async function probarCandidatosLoadSco(origin, p) {
+        const candidatos = [];
+        const orgParam = p.currentorg ? `&currentorg=${encodeURIComponent(p.currentorg)}&mode=${encodeURIComponent(p.mode || '')}&attempt=${encodeURIComponent(p.attempt || '1')}` : '';
+
+        if (p.aId && p.scoid) {
+            if (orgParam) candidatos.push(`${origin}/mod/scorm/loadSCO.php?a=${encodeURIComponent(p.aId)}&scoid=${encodeURIComponent(p.scoid)}${orgParam}`);
+            candidatos.push(`${origin}/mod/scorm/loadSCO.php?a=${encodeURIComponent(p.aId)}&scoid=${encodeURIComponent(p.scoid)}`);
+        }
+        if (p.cmId && p.scoid) {
+            if (orgParam) candidatos.push(`${origin}/mod/scorm/loadSCO.php?id=${encodeURIComponent(p.cmId)}&scoid=${encodeURIComponent(p.scoid)}${orgParam}`);
+            candidatos.push(`${origin}/mod/scorm/loadSCO.php?id=${encodeURIComponent(p.cmId)}&scoid=${encodeURIComponent(p.scoid)}`);
+        }
+        if (p.cmId) {
+            candidatos.push(`${origin}/mod/scorm/loadSCO.php?id=${encodeURIComponent(p.cmId)}`);
+        }
+
+        for (const cand of candidatos) {
+            const resultado = await probarLoadSco(cand);
+            if (resultado) return resultado;
+        }
+        return null;
+    }
+
+    async function resolverDestinoRecurso(url) {
+        if (esUrlPdfDirecto(url)) {
+            return { tipo: 'pdf', url: new URL(url, window.location.href).href };
+        }
+
+        const directo = extraerRutaContent(url);
+        if (directo) return { tipo: 'scorm', url: directo };
+
+        try {
+            const uObj = new URL(url, window.location.href);
+            const origin = uObj.origin;
+            let estadoParams = extraerParametrosScorm('', uObj.href, {});
+
+            const resView = await fetch(uObj.href, { credentials: 'include' });
+            const baseActual = resView.url || uObj.href;
+            const cTypeView = (resView.headers.get('content-type') || '').toLowerCase();
+
+            if (esUrlPdfDirecto(baseActual) || cTypeView.includes('application/pdf')) {
+                const blobPdf = await resView.blob();
+                return { tipo: 'pdf', url: baseActual, blob: blobPdf };
+            }
+
+            const desdeViewUrl = extraerRutaContent(baseActual);
+            if (desdeViewUrl) return { tipo: 'scorm', url: desdeViewUrl };
+
+            if (!resView.ok) return null;
+            const htmlView = await resView.text();
+
+            const pdfEnView = extraerUrlPdfDesdeTexto(htmlView, baseActual);
+            if (pdfEnView) return { tipo: 'pdf', url: pdfEnView };
+
+            const desdeViewHtml = extraerRutaContent(htmlView);
+            if (desdeViewHtml) return { tipo: 'scorm', url: desdeViewHtml };
+
+            estadoParams = extraerParametrosScorm(htmlView, baseActual, estadoParams);
+
+            const urlScoDirecto = extraerUrlLoadSco(htmlView, baseActual);
+            if (urlScoDirecto) {
+                const resDirecto = await probarLoadSco(urlScoDirecto);
+                if (resDirecto) return resDirecto;
+            }
+
+            if (estadoParams.scoid && (estadoParams.aId || estadoParams.cmId)) {
+                const desdeParamsView = await probarCandidatosLoadSco(origin, estadoParams);
+                if (desdeParamsView) return desdeParamsView;
+            }
+
+            const docView = new DOMParser().parseFromString(htmlView, 'text/html');
+            const form = docView.querySelector('form#scormviewform, form[action*="player.php"]');
+            const formParams = new URLSearchParams();
+
+            if (form) {
+                for (const input of form.querySelectorAll('input, select')) {
+                    const name = input.getAttribute('name');
+                    if (!name) continue;
+                    const type = (input.getAttribute('type') || '').toLowerCase();
+                    if ((type === 'radio' || type === 'checkbox') && !input.checked && !input.hasAttribute('checked')) continue;
+                    formParams.set(name, input.value || input.getAttribute('value') || '');
+                }
+            }
+
+            if (!formParams.get('cm') && estadoParams.cmId) formParams.set('cm', estadoParams.cmId);
+            if (!formParams.get('scoid') && estadoParams.scoid) formParams.set('scoid', estadoParams.scoid);
+            if (!formParams.get('a') && estadoParams.aId) formParams.set('a', estadoParams.aId);
+            if (!formParams.get('currentorg') && estadoParams.currentorg) formParams.set('currentorg', estadoParams.currentorg);
+
+            let urlPlayer = `${origin}/mod/scorm/player.php`;
+            if (form && form.getAttribute('action')) {
+                urlPlayer = new URL(form.getAttribute('action').replace(/&amp;/gi, '&'), baseActual).href;
+            } else {
+                const linkPlayer = docView.querySelector('a[href*="player.php"], iframe[src*="player.php"]');
+                if (linkPlayer) {
+                    const href = linkPlayer.getAttribute('href') || linkPlayer.getAttribute('src');
+                    if (href) urlPlayer = new URL(href.replace(/&amp;/gi, '&'), baseActual).href;
+                }
+            }
+
+            const intentosPlayer = [];
+            if (Array.from(formParams.keys()).length > 0) {
+                intentosPlayer.push(() => fetch(urlPlayer, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: formParams.toString()
+                }));
+            }
+
+            const sep = urlPlayer.includes('?') ? '&' : '?';
+            const urlPlayerGet = Array.from(formParams.keys()).length > 0 ? `${urlPlayer}${sep}${formParams.toString()}` : urlPlayer;
+            intentosPlayer.push(() => fetch(urlPlayerGet, { credentials: 'include' }));
+
+            for (const ejecutarFetchPlayer of intentosPlayer) {
+                try {
+                    const resPlayer = await ejecutarFetchPlayer();
+                    if (esUrlPdfDirecto(resPlayer.url)) {
+                        return { tipo: 'pdf', url: resPlayer.url };
+                    }
+                    const desdePlayerUrl = extraerRutaContent(resPlayer.url);
+                    if (desdePlayerUrl) return { tipo: 'scorm', url: desdePlayerUrl };
+
+                    if (resPlayer.ok) {
+                        const htmlPlayer = await resPlayer.text();
+                        const pdfEnPlayer = extraerUrlPdfDesdeTexto(htmlPlayer, resPlayer.url || urlPlayer);
+                        if (pdfEnPlayer) return { tipo: 'pdf', url: pdfEnPlayer };
+
+                        const desdePlayerHtml = extraerRutaContent(htmlPlayer);
+                        if (desdePlayerHtml) return { tipo: 'scorm', url: desdePlayerHtml };
+
+                        estadoParams = extraerParametrosScorm(htmlPlayer, resPlayer.url || urlPlayer, estadoParams);
+
+                        const urlSco = extraerUrlLoadSco(htmlPlayer, resPlayer.url || urlPlayer);
+                        if (urlSco) {
+                            const resSco = await probarLoadSco(urlSco);
+                            if (resSco) return resSco;
+                        }
+
+                        if (estadoParams.scoid) {
+                            const desdeParamsPlayer = await probarCandidatosLoadSco(origin, estadoParams);
+                            if (desdeParamsPlayer) return desdeParamsPlayer;
+                        }
+                    }
+                } catch {}
+            }
+
+            return await probarCandidatosLoadSco(origin, estadoParams);
+        } catch (e) {
+            console.warn('[UVEG Bloc Notas] Error al resolver destino del recurso:', e);
+        }
+        return null;
+    }
+
+    async function validarItemsModResource(lista) {
+        const resultado = [];
+        for (const item of lista) {
+            if (!item.requiereValidarSaltoPdf) {
+                resultado.push(item);
+                continue;
+            }
+            try {
+                const destino = await resolverDestinoRecurso(item.url);
+                if (destino && destino.tipo === 'pdf') {
+                    const nomPdf = extraerNombreArchivoPdf(destino.url) || '';
+                    if (REGEX_CODIGO_LECCION.test(nomPdf)) {
+                        const tituloPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                        resultado.push({
+                            titulo: tituloPdf,
+                            url: destino.url,
+                            tipo: 'pdf',
+                            numero: extraerNumeroLeccion(tituloPdf) ?? 999
+                        });
+                    }
+                }
+            } catch {}
+        }
+        return resultado;
+    }
+
+    // Recorrido interno en paralelo de las secciones 2, 3 y 4 del curso
+    async function escanearTodasLasSecciones(courseId) {
         if (escaneandoSecciones || !courseId || hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
             return;
         }
@@ -290,13 +932,12 @@
         ultimoCursoEscaneado = courseId;
 
         const secciones = [2, 3, 4];
-        const seccionesOtras = secciones.filter(s => s !== seccionActual);
 
         // Mostrar estado de carga limpio
         renderizarEstadoCarga();
 
         // Peticiones en paralelo con Promise.allSettled
-        await Promise.allSettled(seccionesOtras.map(async (sec) => {
+        await Promise.allSettled(secciones.map(async (sec) => {
             try {
                 const urlSec = `${window.location.origin}/course/view.php?id=${courseId}&mainsection=${sec}`;
                 const respuesta = await fetch(urlSec, { credentials: 'include' });
@@ -306,9 +947,12 @@
                 const parser = new DOMParser();
                 const docSec = parser.parseFromString(html, 'text/html');
 
-                const nuevos = encontrarIframesEnDocumento(docSec);
+                const nuevosRaw = encontrarIframesEnDocumento(docSec);
+                const nuevos = await validarItemsModResource(nuevosRaw);
+
                 for (const item of nuevos) {
-                    if (!itemsAcumulados.some(it => it.url === item.url)) {
+                    const norm = normalizarUrl(item.url);
+                    if (!itemsAcumulados.some(it => normalizarUrl(it.url) === norm)) {
                         itemsAcumulados.push(item);
                     }
                 }
@@ -317,10 +961,14 @@
             }
         }));
 
+        // Filtrar cualquier item local pendiente de validación de salto PDF
+        itemsAcumulados = await validarItemsModResource(itemsAcumulados);
+
         escaneandoSecciones = false;
 
-        // Ordenar todos los items acumulados por título (L1, L2, L3...)
+        // Ordenar todos los items acumulados por número de lección (L1, L2, L3... L12)
         itemsAcumulados = ordenarPorTitulo(itemsAcumulados);
+        firmaActual = JSON.stringify(itemsAcumulados);
         renderizar(itemsAcumulados);
     }
 
@@ -873,7 +1521,6 @@
         contenedor.appendChild(carga);
     }
 
-    
     // --- MOTOR ZIP AUTÓNOMO COMPATIBLE CON WINDOWS EXPLORER ---
     const crcTable = new Uint32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -953,43 +1600,65 @@
         }
     }
 
-    async function descargarLeccionScorm(item, btnElement) {
+    function dispararDescargaNavegador(blob, nombreArchivo) {
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = nombreArchivo;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    }
+
+    async function descargarLeccionScormOPdf(item, btnElement) {
         if (!btnElement || btnElement.classList.contains('descargando')) return;
 
         btnElement.classList.add('descargando');
         btnElement.innerHTML = `<span>Buscando...</span>`;
 
         try {
-            let baseScorm = '';
-            // Si la URL es directa a mod_scorm/content:
-            const matchContent = item.url.match(/(https?:\/\/[^"']+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
-            if (matchContent) {
-                baseScorm = matchContent[1];
-            } else {
-                // Si es un view.php, resolver loadSCO
-                const resView = await fetch(item.url, { credentials: 'same-origin' });
-                const htmlView = await resView.text();
-                const matchBase = htmlView.match(/(https?:\/\/[^"']+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
-                if (matchBase) {
-                    baseScorm = matchBase[1];
-                } else {
-                    const matchSco = htmlView.match(/([a-zA-Z0-9_.-]*loadSCO\.php\?[^"']+)/i);
-                    if (matchSco) {
-                        const urlSco = new URL(matchSco[1], item.url).href;
-                        const resSco = await fetch(urlSco, { credentials: 'same-origin' });
-                        const htmlSco = await resSco.text();
-                        const matchFinal = htmlSco.match(/(https?:\/\/[^"']+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
-                        if (matchFinal) baseScorm = matchFinal[1];
-                    }
+            const destino = await resolverDestinoRecurso(item.url);
+            if (!destino) {
+                throw new Error('No se pudo localizar el paquete SCORM o PDF');
+            }
+
+            const slug = (item.titulo || 'leccion')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^a-zA-Z0-9_-]/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_|_$/g, '')
+                .substring(0, 50);
+
+            // Caso 1: El recurso es un PDF directo o dio un salto hacia un PDF (ej. L3_Comic.pdf)
+            if (destino.tipo === 'pdf') {
+                btnElement.innerHTML = `<span>Descargando PDF...</span>`;
+                let blobPdf = destino.blob;
+                if (!blobPdf) {
+                    const resPdf = await fetch(destino.url, { credentials: 'include' });
+                    if (!resPdf.ok) throw new Error('Error al descargar PDF (' + resPdf.status + ')');
+                    blobPdf = await resPdf.blob();
                 }
+
+                const nombrePdf = extraerNombreArchivoPdf(destino.url) || `${slug}.pdf`;
+                dispararDescargaNavegador(blobPdf, nombrePdf);
+
+                btnElement.classList.remove('descargando');
+                btnElement.classList.add('descargado-exito');
+                btnElement.innerHTML = `${SVG_CHECK}<span>¡Listo!</span>`;
+
+                setTimeout(() => {
+                    btnElement.classList.remove('descargado-exito');
+                    btnElement.innerHTML = `${SVG_DESCARGAR}<span>Descargar</span>`;
+                }, 3500);
+                return;
             }
 
-            if (!baseScorm) {
-                throw new Error('No se pudo localizar el paquete SCORM');
-            }
-
+            // Caso 2: El recurso es un paquete SCORM interactivo
+            const baseScorm = destino.url;
             btnElement.innerHTML = `<span>Leyendo...</span>`;
-            const manifestRes = await fetch(baseScorm + 'imsmanifest.xml');
+            const manifestRes = await fetch(baseScorm + 'imsmanifest.xml', { credentials: 'include' });
             if (!manifestRes.ok) throw new Error('Error al leer imsmanifest.xml (' + manifestRes.status + ')');
             const manifestXml = await manifestRes.text();
 
@@ -1011,38 +1680,55 @@
 
             const arrayArchivos = Array.from(listaArchivos);
             const zip = new VanillaZipEngine();
+            const pdfsInternos = new Set();
             let completados = 0;
 
-            for (let i = 0; i < arrayArchivos.length; i++) {
-                const ruta = arrayArchivos[i];
-                try {
-                    const res = await fetch(baseScorm + ruta);
-                    if (res.ok) {
-                        const buf = await res.arrayBuffer();
-                        zip.add(ruta, new Uint8Array(buf));
-                        completados++;
-                        if (completados % 10 === 0 || completados === arrayArchivos.length) {
+            const BATCH_SIZE = 8;
+            for (let i = 0; i < arrayArchivos.length; i += BATCH_SIZE) {
+                const lote = arrayArchivos.slice(i, i + BATCH_SIZE);
+                await Promise.all(lote.map(async (ruta) => {
+                    try {
+                        const res = await fetch(baseScorm + ruta, { credentials: 'include' });
+                        if (res.ok) {
+                            const buf = await res.arrayBuffer();
+                            const uint8 = new Uint8Array(buf);
+                            zip.add(ruta, uint8);
+
+                            // Si el archivo dentro del SCORM tiene un salto a un PDF de UVEG (como L3_Comic.pdf), detectarlo para descargarlo también
+                            if (/\.(js|html|htm|xml|json)$/i.test(ruta)) {
+                                try {
+                                    const texto = new TextDecoder('utf-8').decode(uint8).replace(/\\\//g, '/');
+                                    const regexPdf = /https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?/gi;
+                                    let mPdf;
+                                    while ((mPdf = regexPdf.exec(texto)) !== null) {
+                                        pdfsInternos.add(mPdf[0]);
+                                    }
+                                } catch {}
+                            }
+
+                            completados++;
                             const pct = Math.round((completados / arrayArchivos.length) * 100);
                             btnElement.innerHTML = `<span>${pct}%</span>`;
                         }
-                    }
-                } catch {}
+                    } catch {}
+                }));
             }
 
             btnElement.innerHTML = `<span>Empacando...</span>`;
-            const blob = zip.buildBlob();
+            const blobZip = zip.buildBlob();
+            dispararDescargaNavegador(blobZip, `Leccion_${slug}_Offline.zip`);
 
-            const slug = (item.titulo || 'leccion')
-                .replace(/[^a-zA-Z0-9_-]/g, '_')
-                .replace(/_+/g, '_')
-                .substring(0, 40);
-
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = `Leccion_${slug}_Offline.zip`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+            // Si el SCORM tenía un salto interno a un PDF (como L3_Comic.pdf), descargarlo también automáticamente
+            for (const urlPdfExtra of pdfsInternos) {
+                try {
+                    const resExtra = await fetch(urlPdfExtra, { credentials: 'include' });
+                    if (resExtra.ok) {
+                        const blobExtra = await resExtra.blob();
+                        const nomExtra = extraerNombreArchivoPdf(urlPdfExtra) || `${slug}_Anexo.pdf`;
+                        dispararDescargaNavegador(blobExtra, nomExtra);
+                    }
+                } catch {}
+            }
 
             btnElement.classList.remove('descargando');
             btnElement.classList.add('descargado-exito');
@@ -1054,7 +1740,7 @@
             }, 3500);
 
         } catch (err) {
-            console.error('[UVEG Bloc Notas] Error al descargar SCORM:', err);
+            console.error('[UVEG Bloc Notas] Error al descargar recurso:', err);
             btnElement.classList.remove('descargando');
             btnElement.innerHTML = `<span>Error</span>`;
             setTimeout(() => {
@@ -1165,17 +1851,23 @@
             const accionesEl = document.createElement('div');
             accionesEl.className = 'item-acciones';
 
-            // Botón selectivo: Únicamente para lecciones de tipo SCORM
-            const esScorm = item.tipo === 'scorm' || /mod\/scorm|mod_scorm/i.test(item.url);
-            if (esScorm) {
+            // Botón Descargar para lecciones SCORM y documentos PDF (ej. L3_Comic.pdf)
+            const esDescargable =
+                item.tipo === 'scorm' ||
+                item.tipo === 'pdf' ||
+                /mod\/scorm|mod_scorm|mod\/resource|mod_resource|\.pdf/i.test(item.url);
+
+            if (esDescargable) {
                 const btnDescargar = document.createElement('button');
                 btnDescargar.type = 'button';
                 btnDescargar.className = 'btn-descargar-item';
                 btnDescargar.innerHTML = `${SVG_DESCARGAR}<span>Descargar</span>`;
-                btnDescargar.title = 'Descargar lección interactiva offline (.zip)';
+                btnDescargar.title = item.tipo === 'pdf'
+                    ? 'Descargar documento PDF'
+                    : 'Descargar lección interactiva offline (.zip o .pdf)';
                 btnDescargar.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    descargarLeccionScorm(item, btnDescargar);
+                    descargarLeccionScormOPdf(item, btnDescargar);
                 });
                 accionesEl.appendChild(btnDescargar);
             }
@@ -1244,7 +1936,6 @@
                     const tarjeta6 = tarjetas[5];
                     const rectScroll = listaScroll.getBoundingClientRect();
                     const rect6 = tarjeta6.getBoundingClientRect();
-                    // Distancia exacta desde el tope hasta la base de la 6ta tarjeta + scroll + padding inferior (10px)
                     const distancia6 = (rect6.bottom - rectScroll.top) + listaScroll.scrollTop + 10;
                     const altura6 = Math.ceil(distancia6);
                     if (altura6 > 50) {
@@ -1274,7 +1965,6 @@
             firmaActual = '';
             descartado = estaCursoCerradoEnSesion(courseId);
         } else if (urlActual !== ultimaUrlRegistrada) {
-            // Misma ID de curso, pero cambió URL interna (hijos, mainsection, chall, etc.)
             ultimaUrlRegistrada = urlActual;
             if (estaCursoCerradoEnSesion(courseId)) {
                 descartado = true;
@@ -1288,25 +1978,28 @@
             return;
         }
 
-        const seccionActual = obtenerSeccionActual();
         const itemsDom = encontrarIframesEnDocumento(document);
 
-        // Incorporar items del DOM actual
+        // Incorporar items del DOM actual (excepto mod/resource pendientes de validar si ya se escaneó el curso)
         for (const item of itemsDom) {
-            if (!itemsAcumulados.some(it => it.url === item.url)) {
+            if (item.requiereValidarSaltoPdf && ultimoCursoEscaneado === courseId) {
+                continue;
+            }
+            const norm = normalizarUrl(item.url);
+            if (!itemsAcumulados.some(it => normalizarUrl(it.url) === norm)) {
                 itemsAcumulados.push(item);
             }
+        }
+
+        // 3. Si estamos en la página del curso en UVEG, lanzar el escaneo completo de las secciones 2, 3 y 4 ("por arriba")
+        if (courseId && esPaginaCurso() && !escaneandoSecciones && ultimoCursoEscaneado !== courseId && hostname.endsWith('uveg.edu.mx')) {
+            escanearTodasLasSecciones(courseId);
+            return;
         }
 
         if (!seccionEsPermitida(itemsAcumulados) || itemsAcumulados.length === 0) {
             firmaActual = '';
             quitarHost();
-            return;
-        }
-
-        // Lanzar escaneo silencioso en segundo plano
-        if (courseId && seccionActual && !escaneandoSecciones && ultimoCursoEscaneado !== courseId) {
-            escanearTodasLasSecciones(courseId, seccionActual);
             return;
         }
 
