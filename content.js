@@ -32,6 +32,9 @@
     const ESPERA_REVISION_MS = 350;
     const DURACION_AVISO_MS = 1800;
     const REGEX_CODIGO_LECCION = /(?:LEC[_-]?L|[A-Z0-9]+_L|_L|L[_-]|LECCION[_-]?\s*|\bL)[_-]?0*(\d+)(?!\d)/i;
+    const REGEX_NUMERO_PLECCION = /lecci[oó]n\s*0*(\d+)(?!\d)/i;
+    const STORAGE_KEY_CURSO_ID = 'uveg_bloc_ultimo_curso_id';
+    const STORAGE_KEY_MAPA_PLECCION = 'uveg_bloc_mapa_pleccion_';
 
     let host = null;
     let contenedor = null;
@@ -84,6 +87,8 @@
 
     function extraerNumeroLeccion(texto) {
         if (!texto) return null;
+        const mPLec = String(texto).match(REGEX_NUMERO_PLECCION);
+        if (mPLec) return parseInt(mPLec[1], 10);
         const m = String(texto).match(REGEX_CODIGO_LECCION);
         return m ? parseInt(m[1], 10) : null;
     }
@@ -137,7 +142,16 @@
 
     function obtenerIdCurso() {
         const match = window.location.href.match(/[?&]id=(\d+)($|&)/i);
-        if (match) return match[1];
+        if (match) {
+            if (/\/course\/view\.php/i.test(window.location.pathname)) {
+                try { localStorage.setItem(STORAGE_KEY_CURSO_ID, match[1]); } catch {}
+            }
+            return match[1];
+        }
+        try {
+            const guardado = localStorage.getItem(STORAGE_KEY_CURSO_ID);
+            if (guardado && guardado.trim()) return guardado.trim();
+        } catch {}
         if (esUrlPdfDirecto(window.location.href)) {
             return 'pdf_' + (extraerNombreArchivoPdf(window.location.href) || 'doc');
         }
@@ -199,27 +213,40 @@
         return false;
     }
 
-    // Algoritmo de ordenamiento natural por número de lección (L1, L2, L3... L12) y título
+    // Algoritmo de ordenamiento natural interno por código/número (LEC_L1..LEC_L12) mostrando en la fichita <p class="leccion2-pLeccion">
     function ordenarPorTitulo(items) {
         const vistosUrl = new Set();
         const porClave = new Map();
         const sinNumero = [];
+        const mapaPLeccion = cargarMapaPLeccion(obtenerIdCurso());
 
         for (const it of items) {
             const norm = normalizarUrl(it.url);
             if (vistosUrl.has(norm)) continue;
             vistosUrl.add(norm);
 
-            const num = it.numero ?? extraerNumeroLeccion(it.titulo);
+            const codInterno = it.codigo || it.titulo || SIN_TITULO;
+            const num = it.numero ?? extraerNumeroLeccion(codInterno) ?? extraerNumeroLeccion(it.titulo);
+            const tituloVisual = (num !== null && num !== 999 && mapaPLeccion[String(num)])
+                ? mapaPLeccion[String(num)]
+                : it.titulo;
+
+            const itemEnriquecido = {
+                ...it,
+                codigo: codInterno,
+                titulo: tituloVisual,
+                numero: num !== null ? num : 999
+            };
+
             if (num !== null && num !== 999) {
                 const esPdf = it.tipo === 'pdf' || esUrlPdfDirecto(it.url);
-                const clave = esPdf ? `${num}_pdf_${it.titulo}` : `${num}_main`;
+                const clave = esPdf ? `${num}_pdf_${codInterno}` : `${num}_main`;
                 const existente = porClave.get(clave);
                 if (!existente || (it.tipo === 'genially' && existente.tipo !== 'genially')) {
-                    porClave.set(clave, { ...it, numero: num });
+                    porClave.set(clave, itemEnriquecido);
                 }
             } else {
-                sinNumero.push({ ...it, numero: 999 });
+                sinNumero.push(itemEnriquecido);
             }
         }
 
@@ -227,14 +254,102 @@
             if (a.numero !== b.numero) return a.numero - b.numero;
             if (a.tipo !== 'pdf' && b.tipo === 'pdf') return -1;
             if (a.tipo === 'pdf' && b.tipo !== 'pdf') return 1;
-            return a.titulo.localeCompare(b.titulo, undefined, { numeric: true, sensitivity: 'base' });
+            return (a.codigo || a.titulo).localeCompare(b.codigo || b.titulo, undefined, { numeric: true, sensitivity: 'base' });
         });
 
         sinNumero.sort((a, b) => a.titulo.localeCompare(b.titulo, undefined, { numeric: true, sensitivity: 'base' }));
         return [...conNumero, ...sinNumero];
     }
 
-    // --- EXTRACCIÓN DE TÍTULOS Y CÓDIGOS (%L%, LEC_L1, CPFI_L4, L3_Comic.pdf) ---
+    // --- EXTRACCIÓN DE TÍTULOS (<p class="leccion2-pLeccion">) Y CÓDIGOS INTERNOS (LEC_L1..L12, CPFI_L4..L12, L3_Comic) ---
+
+    function cargarMapaPLeccion(courseId) {
+        const clave = STORAGE_KEY_MAPA_PLECCION + (courseId || 'default');
+        try {
+            const raw = localStorage.getItem(clave);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') return parsed;
+            }
+        } catch {}
+        return {};
+    }
+
+    function guardarMapaPLeccion(courseId, mapa) {
+        if (!mapa || typeof mapa !== 'object') return;
+        const clave = STORAGE_KEY_MAPA_PLECCION + (courseId || 'default');
+        try {
+            const actual = cargarMapaPLeccion(courseId);
+            const combinado = { ...actual, ...mapa };
+            localStorage.setItem(clave, JSON.stringify(combinado));
+        } catch {}
+    }
+
+    function extraerMapaPLeccionDeDocumento(doc = document, courseId = '') {
+        const mapa = cargarMapaPLeccion(courseId);
+        if (!doc || !doc.querySelectorAll) return mapa;
+
+        try {
+            const parrafos = doc.querySelectorAll('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+            for (const p of parrafos) {
+                const txt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!txt || txt.length < 3) continue;
+
+                let num = extraerNumeroLeccion(txt);
+                if (num === null) {
+                    const idAnc = extraerIdContenedorLeccion(p);
+                    num = extraerNumeroLeccion(idAnc);
+                }
+                if (num !== null && num !== 999) {
+                    mapa[String(num)] = txt;
+                }
+            }
+            guardarMapaPLeccion(courseId, mapa);
+        } catch {}
+
+        return mapa;
+    }
+
+    function obtenerNombrePLeccion(el, doc, contenedorExplicito, numLeccion, codigoFallback, mapaPLeccion = {}) {
+        try {
+            const contenedor = contenedorExplicito || (el && el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null);
+            if (contenedor && contenedor.querySelectorAll) {
+                const pList = contenedor.querySelectorAll('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+                if (pList.length === 1) {
+                    const txt = (pList[0].innerText || pList[0].textContent || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length > 2) return txt;
+                } else if (pList.length > 1 && numLeccion !== null && numLeccion !== 999) {
+                    for (const p of pList) {
+                        const txt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (extraerNumeroLeccion(txt) === numLeccion) return txt;
+                    }
+                }
+            }
+
+            if (numLeccion !== null && numLeccion !== 999) {
+                if (mapaPLeccion && mapaPLeccion[String(numLeccion)]) {
+                    return mapaPLeccion[String(numLeccion)];
+                }
+                const guardado = cargarMapaPLeccion(obtenerIdCurso());
+                if (guardado[String(numLeccion)]) {
+                    return guardado[String(numLeccion)];
+                }
+            }
+
+            if (el && el.closest) {
+                const sec = el.closest('.activity, .activityinstance, .contentitem, .section, .box, li, div');
+                if (sec && sec.querySelector) {
+                    const pCercano = sec.querySelector('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+                    if (pCercano) {
+                        const txt = (pCercano.innerText || pCercano.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (txt.length > 2) return txt;
+                    }
+                }
+            }
+        } catch {}
+
+        return codigoFallback || SIN_TITULO;
+    }
 
     function extraerIdContenedorLeccion(el) {
         if (!el) return '';
@@ -288,7 +403,7 @@
         return SIN_TITULO;
     }
 
-    function extraerTituloElemento(el, contextDoc = document, contenedorExplicito = null, rawUrl = '') {
+    function extraerCodigoElemento(el, contextDoc = document, contenedorExplicito = null, rawUrl = '') {
         if (!el) return SIN_TITULO;
         if (el.tagName === 'IFRAME') {
             return extraerTitulo(el, contextDoc);
@@ -297,28 +412,9 @@
         try {
             const contenedor = contenedorExplicito || (el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"], .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null);
             if (contenedor) {
-                const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
-                if (tituloUveg) {
-                    const txt = (tituloUveg.innerText || tituloUveg.textContent || '').replace(/\s+/g, ' ').trim();
-                    if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
-                        return txt;
-                    }
-                }
-
-                // Si el contenedor tiene un ID de lección tipo id="LEC_L1", usarlo directamente
                 const idCont = (contenedor.getAttribute && contenedor.getAttribute('id')) || contenedor.id || '';
                 if (idCont && REGEX_CODIGO_LECCION.test(idCont) && !/^module-/i.test(idCont)) {
                     return idCont.trim();
-                }
-
-                const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
-                if (header) {
-                    const copia = header.cloneNode(true);
-                    copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
-                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
-                    if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
-                        return txt;
-                    }
                 }
             }
 
@@ -331,6 +427,26 @@
                 const nomPdf = extraerNombreArchivoPdf(rawUrl);
                 if (nomPdf) {
                     return nomPdf.replace(/\.pdf$/i, '').trim();
+                }
+            }
+
+            if (contenedor) {
+                const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
+                if (tituloUveg) {
+                    const txt = (tituloUveg.innerText || tituloUveg.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
+                        return txt;
+                    }
+                }
+
+                const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
+                if (header) {
+                    const copia = header.cloneNode(true);
+                    copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
+                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
+                    if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
+                        return txt;
+                    }
                 }
             }
 
@@ -416,14 +532,20 @@
         const encontrados = [];
         const contenedoresConGenially = new Set();
         const numerosConGenially = new Set();
+        const courseIdActual = obtenerIdCurso();
+        const mapaPLeccion = extraerMapaPLeccionDeDocumento(doc, courseIdActual);
 
         // 0. Si el navegador dio un salto directo a un archivo PDF de UVEG (ej. .../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf)
         if (doc === document && esUrlPdfDirecto(window.location.href)) {
             const nombrePdf = extraerNombreArchivoPdf(window.location.href) || 'Documento.pdf';
-            const tituloPdf = nombrePdf.replace(/\.pdf$/i, '').trim() || 'Documento_PDF';
-            const numPdf = extraerNumeroLeccion(tituloPdf);
+            const codigoPdf = nombrePdf.replace(/\.pdf$/i, '').trim() || 'Documento_PDF';
+            const numPdf = extraerNumeroLeccion(codigoPdf);
+            const tituloVisual = (numPdf !== null && mapaPLeccion[String(numPdf)])
+                ? mapaPLeccion[String(numPdf)]
+                : codigoPdf;
             return [{
-                titulo: tituloPdf,
+                codigo: codigoPdf,
+                titulo: tituloVisual,
                 url: window.location.href,
                 tipo: 'pdf',
                 numero: numPdf !== null ? numPdf : 999
@@ -438,30 +560,34 @@
             let src = rawSrc;
             try { src = new URL(rawSrc, window.location.href).href; } catch {}
 
-            const titulo = extraerTitulo(iframe, doc);
-            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+            const codigo = extraerTitulo(iframe, doc);
+            if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const urlNorm = normalizarUrl(src);
             if (vistos.has(urlNorm)) continue;
             vistos.add(urlNorm);
 
+            let numCont = null;
             const contPadre = iframe.closest ? iframe.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null;
             if (contPadre) {
                 contenedoresConGenially.add(contPadre);
-                const numCont = extraerNumeroLeccion(contPadre.id);
+                numCont = extraerNumeroLeccion(contPadre.id);
                 if (numCont !== null) numerosConGenially.add(numCont);
             }
 
-            const numTitulo = extraerNumeroLeccion(titulo);
-            if (numTitulo !== null) {
-                numerosConGenially.add(numTitulo);
+            const numCodigo = extraerNumeroLeccion(codigo) ?? numCont;
+            if (numCodigo !== null) {
+                numerosConGenially.add(numCodigo);
             }
 
+            const tituloVisual = obtenerNombrePLeccion(iframe, doc, contPadre, numCodigo, codigo, mapaPLeccion);
+
             encontrados.push({
-                titulo: titulo,
+                codigo: codigo,
+                titulo: tituloVisual,
                 url: src,
                 tipo: 'genially',
-                numero: numTitulo !== null ? numTitulo : 999
+                numero: numCodigo !== null ? numCodigo : 999
             });
         }
 
@@ -484,17 +610,20 @@
             let rawUrl = infoEl.rawAttr;
             try { rawUrl = new URL(infoEl.rawAttr, window.location.href).href; } catch {}
 
-            const titulo = extraerTituloElemento(infoEl.el, doc, cont, rawUrl);
-            if (!titulo || titulo === SIN_TITULO) continue;
-            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+            const codigo = extraerCodigoElemento(infoEl.el, doc, cont, rawUrl);
+            if (!codigo || codigo === SIN_TITULO) continue;
+            if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const urlNorm = normalizarUrl(rawUrl);
             if (vistos.has(urlNorm)) continue;
             vistos.add(urlNorm);
 
-            const num = numLeccion !== null ? numLeccion : (extraerNumeroLeccion(titulo) ?? 999);
+            const num = numLeccion !== null ? numLeccion : (extraerNumeroLeccion(codigo) ?? 999);
+            const tituloVisual = obtenerNombrePLeccion(infoEl.el, doc, cont, num, codigo, mapaPLeccion);
+
             encontrados.push({
-                titulo: titulo,
+                codigo: codigo,
+                titulo: tituloVisual,
                 url: rawUrl,
                 tipo: determinarTipoRecurso(rawUrl),
                 numero: num
@@ -527,8 +656,8 @@
             const urlNorm = normalizarUrl(rawUrl);
             if (vistos.has(urlNorm)) continue;
 
-            let titulo = extraerTituloElemento(el, doc, padreCont, rawUrl);
-            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+            let codigo = extraerCodigoElemento(el, doc, padreCont, rawUrl);
+            if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const esPdfDirecto = esUrlPdfDirecto(rawUrl);
             const esModRes = /\/mod\/resource\/|\/mod_resource\//i.test(rawUrl);
@@ -536,19 +665,22 @@
             if (!padreCont) {
                 if (esPdfDirecto) {
                     const nomPdf = extraerNombreArchivoPdf(rawUrl) || '';
-                    if (!REGEX_CODIGO_LECCION.test(nomPdf) && !REGEX_CODIGO_LECCION.test(titulo)) {
+                    if (!REGEX_CODIGO_LECCION.test(nomPdf) && !REGEX_CODIGO_LECCION.test(codigo)) {
                         continue;
                     }
-                    if (!titulo || titulo === SIN_TITULO) {
-                        titulo = nomPdf.replace(/\.pdf$/i, '');
+                    if (!codigo || codigo === SIN_TITULO || !REGEX_CODIGO_LECCION.test(codigo)) {
+                        codigo = nomPdf.replace(/\.pdf$/i, '');
                     }
                 } else if (esModRes) {
+                    const numRes = extraerNumeroLeccion(codigo) ?? 999;
+                    const tituloRes = obtenerNombrePLeccion(el, doc, padreCont, numRes, codigo, mapaPLeccion);
                     vistos.add(urlNorm);
                     encontrados.push({
-                        titulo: titulo,
+                        codigo: codigo,
+                        titulo: tituloRes,
                         url: rawUrl,
                         tipo: 'pdf',
-                        numero: extraerNumeroLeccion(titulo) ?? 999,
+                        numero: numRes,
                         requiereValidarSaltoPdf: true
                     });
                     continue;
@@ -557,14 +689,17 @@
                 }
             }
 
-            if (!titulo || titulo === SIN_TITULO) continue;
+            if (!codigo || codigo === SIN_TITULO) continue;
 
-            const num = extraerNumeroLeccion(titulo);
+            const num = extraerNumeroLeccion(codigo);
             if (num !== null && numerosConGenially.has(num) && !esPdfDirecto && !esModRes) continue;
+
+            const tituloVisual = obtenerNombrePLeccion(el, doc, padreCont, num, codigo, mapaPLeccion);
 
             vistos.add(urlNorm);
             encontrados.push({
-                titulo: titulo,
+                codigo: codigo,
+                titulo: tituloVisual,
                 url: rawUrl,
                 tipo: determinarTipoRecurso(rawUrl),
                 numero: num !== null ? num : 999
