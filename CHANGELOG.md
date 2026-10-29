@@ -7,7 +7,7 @@ y este proyecto se adhiere a [Semantic Versioning](https://semver.org/lang/es/).
 
 ---
 
-## [1.4.3] - 2026-10-24
+## [1.5.0] - 2026-10-24
 
 ### Añadido
 - **Gestión de ciclo de vida con persistencia en `sessionStorage`:**

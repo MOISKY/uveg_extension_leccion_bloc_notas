@@ -1,7 +1,7 @@
 ﻿# Fichas Técnicas de Casos de Uso
 
 **Proyecto:** UVEG - Lecciones bloc de notas  
-**Versión:** 1.4.3  
+**Versión:** 1.5.0  
 **Fecha:** 2026-10-24  
 
 ---

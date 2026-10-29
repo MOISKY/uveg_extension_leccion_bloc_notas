@@ -2,7 +2,7 @@
 
 **Proyecto:** UVEG - Lecciones bloc de notas  
 **Tipo de Sistema:** Extensión de Navegador Web (Chrome / Chromium / Firefox)  
-**Versión:** 1.4.3  
+**Versión:** 1.5.0  
 **Fecha:** 2026-10-24  
 **Estándar de Referencia:** IEEE 830 / ISO/IEC/IEEE 29148 / Ian Sommerville  
 
