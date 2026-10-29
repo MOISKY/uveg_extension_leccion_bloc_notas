@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "UVEG - Lecciones bloc de notas",
-    "version": "1.4.3",
+    "version": "1.5.0",
     "description": "Detecta, acumula y ordena automáticamente los recursos en el Campus Virtual UVEG con diseño azul institucional con 1 solo clic.",
     "icons": {
         "16": "img/icon-16.png",
