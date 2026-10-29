@@ -1,59 +1,41 @@
-# UVEG - Lecciones bloc de notas (Versión Standalone + Descargas SCORM/PDF)
+# UVEG - Lecciones bloc de notas (v1.5.0 - Visualización `<p class="leccion2-pLeccion">` + Ordenamiento Interno `LEC_L1..L12` + Descargas SCORM/PDF)
 
-![Version](https://img.shields.io/badge/version-1.4.3-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![Manifest](https://img.shields.io/badge/manifest-v3-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Edge%20%7C%20Firefox-lightgrey.svg)
 
-Extensión de navegador web 100% autónoma (sin conexión a Supabase ni servidores externos) para el **Campus Virtual UVEG** (`avalicmod19d.uveg.edu.mx`). Detecta, acumula, ordena, copia en 1 solo clic al portapapeles (formato Bloc de notas) y **descarga localmente paquetes SCORM (`.zip` Offline) y archivos PDF de salto (`.pdf`)**.
+Extensión de navegador web 100% autónoma (sin conexión a Supabase ni servidores externos) para el **Campus Virtual UVEG** (`avalicmod19d.uveg.edu.mx`). Detecta, acumula, ordena internamente por código (`LEC_L1..L12`), muestra visualmente en cada fichita el título de `<p class="leccion2-pLeccion">`, copia en 1 solo clic al portapapeles y **descarga localmente paquetes SCORM (`.zip` Offline) y archivos PDF de salto (`.pdf`)**.
 
 ---
 
-## 🎯 Problema que resuelve
+## 🎯 Cómo funciona la versión actual
 
-En las aulas virtuales de la UVEG, las lecciones y recursos interactivos suelen estar dispersos en diferentes unidades (`mainsection=2`, `3`, `4`), dentro de contenedores SCORM (`LEC_L1..LEC_L11`), `iframes` de Genially (`CPFI_L4..CPFI_L12`) o saltos directos a documentos PDF (`L3_Comic.pdf`). Esta extensión:
-1. **Rastrea todas las secciones del curso automáticamente ("por arriba")** al entrar a `/course/view.php?id=...`, sin que el alumno tenga que entrar a cada unidad ni abrir cada lección manualmente.
-2. **Filtra exactamente las 12 lecciones del módulo**, ignorando ejercicios SCORM de práctica o textos informativos como *"Tiempo estimado de revisión..."*.
-3. **Ordena los recursos numéricamente** (`L1, L2, L3... L12`).
-4. **Ofrece copiado en 1 solo clic** para el Bloc de notas y **botón de descarga directa** para paquetes SCORM (`.zip` ejecutable offline) y documentos PDF (`.pdf`).
-5. **Respeta la lectura del alumno:** Permite cerrar la ventana y **la mantiene cerrada** mientras navega entre secciones del mismo curso, reabriéndose sola si entra a un curso diferente.
-
----
-
-## ✨ Características Principales
-
-* 🚀 **Escaneo Automático Multi-Sección ("Por Arriba"):**
-  * Al abrir la portada del curso (`/course/view.php?id=324`), consulta en segundo plano `mainsection=2`, `3` y `4` (Unidades 1, 2 y 3) y acumula las 12 lecciones de inmediato.
-* 🔍 **Detección Exacta de Lecciones (`LEC_L1..L12`, `CPFI_L4..L12` y Saltos PDF):**
-  * **Genially (`iframe`)**: Detecta interactivos incrustados de Genially y extrae su código (`CPFI_L4`, `CPFI_L6`, etc.).
-  * **Contenedores SCORM (`id="LEC_L1"`, `.img-leccion`)**: Prioriza el enlace de `.img-leccion` y el ID del contenedor (`LEC_L1` a `LEC_L12`), descartando ejercicios o actividades secundarias.
-  * **Saltos a PDF (`L3_Comic.pdf`)**: Detecta enlaces a `/mod/resource/`, `/pluginfile.php/.../*.pdf`, saltos internos dentro de paquetes SCORM hacia archivos PDF y pestañas donde se abre un PDF directamente.
-* 📦 **Descarga Local de Paquetes SCORM (`.zip` Offline) y PDFs (`.pdf`):**
-  * **Resolución Profunda (`resolverDestinoRecurso` + `extraerParametrosScorm`)**: Desambigua `view.php` $\rightarrow$ `player.php` (`M.mod_scorm.init(...)`) $\rightarrow$ `loadSCO.php` para encontrar la raíz exacta `/pluginfile.php/{ctx}/mod_scorm/content/{rev}/`.
-  * **Empaquetador ZIP Nativo (`VanillaZipEngine`)**: Descarga en lotes paralelos de 8 archivos (`story.html`, `html5/data/js/data.js`, `frame.js`, `paths.js`, imágenes, audios y fuentes), genera un `index.html` lanzador y descarga `Leccion_<nombre>_Offline.zip`.
-  * **Auto-descarga de PDFs internos**: Si un paquete SCORM contiene un enlace o salto a un PDF (ej. `L3_Comic.pdf`), lo descarga automáticamente junto con el paquete `.zip`.
-  * **Descarga directa de PDF**: Si el recurso o salto apunta a un PDF, lo descarga directamente al equipo con su nombre original (`L3_Comic.pdf`).
-* 🔄 **Ordenamiento Natural por Número de Lección:** Clasifica las lecciones con orden numérico lógico (`L1` a `L12`), sin importar el orden en el DOM.
-* 📋 **Copiado en 1 Clic con Retroalimentación:**
-  * Clic individual en cualquier ficha para copiar su título y URL formateada.
-  * Botón **"Copiar todo"** en la cabecera para extraer el curso completo.
-  * Botón **"Copiar todo y cerrar"** en el pie para copiar y despejar la pantalla en un solo movimiento.
-* 📜 **Scroll Dinámico Inteligente (> 6 recursos):**
-  * **Hasta 6 recursos (`<= 6`):** La ventana se adapta de forma compacta sin barras de scroll.
-  * **Más de 6 recursos (`> 6`):** La altura visible se fija a 6 fichas (`.con-scroll`) y activa scrollbar vertical fluido.
-* 🛡️ **Aislamiento Total con Shadow DOM (`closed`)** y **Cabecera Arrastrable (Drag & Drop)**.
+1. **Escaneo Automático Multi-Sección ("Por Arriba"):**
+   - Al entrar a `/course/view.php?id=...` (con o sin `mainsection` en la URL), recorre en segundo plano `mainsection=2`, `3` y `4` (Unidades 1, 2 y 3) y acumula las 12 lecciones de golpe en el panel flotante.
+2. **Visualización Limpia con `<p class="leccion2-pLeccion">` en la Fichita:**
+   - Extrae todos los `<p class="leccion2-pLeccion">` de las unidades del curso y los respalda en `localStorage` (`uveg_bloc_mapa_pleccion_{courseId}`).
+   - En cada fichita del panel flotante (y al copiar al portapapeles) se muestra **únicamente el nombre completo de la lección**:
+     `Lección 1. Definición y disposiciones generales de las personas físicas`
+   - Si se detecta un PDF de salto como `L3_Comic.pdf` (que pertenece a la Lección 3), su fichita también muestra el texto de `<p class="leccion2-pLeccion">` de la Lección 3.
+3. **Ordenamiento Interno por Código (`LEC_L1..LEC_L12`, `CPFI_L4..CPFI_L12`, `L3_Comic`):**
+   - El código corto (`LEC_L1`, `CPFI_L4`, `LEC_L12`, `L3_Comic`) se guarda **internamente** en cada ítem (`item.codigo` y `item.numero`) para ordenar las fichitas del `1` al `12` de forma exacta y evitar colisiones entre un SCORM (`LEC_L3`) y su PDF de salto (`L3_Comic`), sin mostrar el código crudo en la etiqueta visual.
+4. **Descarga Local de Paquetes SCORM (`.zip` Offline) y PDFs (`.pdf`):**
+   - **Resolución Profunda (`resolverDestinoRecurso` + `extraerParametrosScorm`)**: Desambigua `view.php` $\rightarrow$ `player.php` (`M.mod_scorm.init(...)`) $\rightarrow$ `loadSCO.php` para localizar la raíz `/pluginfile.php/{ctx}/mod_scorm/content/{rev}/`.
+   - **Empaquetador ZIP Nativo (`VanillaZipEngine`)**: Descarga en lotes paralelos de 8 archivos (`story.html`, `html5/data/js/data.js`, imágenes, audios, etc.), genera el `index.html` lanzador y descarga `Leccion_<nombre>_Offline.zip`.
+   - **Auto-descarga de PDFs de salto**: Si un paquete SCORM tiene un salto interno a un PDF (ej. `L3_Comic.pdf`), o si el recurso salta directamente a un PDF, descarga el archivo `.pdf` automáticamente al equipo.
 
 ---
 
 ## 📝 Formato de Salida (Portapapeles)
 
-Cada recurso se copia al portapapeles con la siguiente estructura limpia:
+Cada recurso se copia al portapapeles usando el título de `<p class="leccion2-pLeccion">`:
 
 ```text
-titulo: LEC_L1
+titulo: Lección 1. Definición y disposiciones generales de las personas físicas
 url: https://avalicmod19d.uveg.edu.mx/mod/scorm/view.php?id=5626
 
-titulo: CPFI_L4
+titulo: Lección 4. Ingresos y obligaciones del régimen...
 url: https://view.genially.com/66425624a5b...
 ```
 

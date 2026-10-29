@@ -48,6 +48,31 @@
     let itemsAcumulados = [];
     let escaneandoSecciones = false;
     let ultimoCursoEscaneado = null;
+    let descargasActivas = 0;
+
+    function esperar(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function fetchConReintento(url, opciones = {}, reintentos = 3, esperaBaseMs = 450) {
+        let ultimoError = null;
+        for (let intento = 1; intento <= reintentos; intento++) {
+            try {
+                const res = await fetch(url, opciones);
+                if (res.ok || (res.status >= 300 && res.status < 500 && res.status !== 408 && res.status !== 429)) {
+                    return res;
+                }
+                ultimoError = new Error(`HTTP ${res.status}`);
+            } catch (err) {
+                ultimoError = err;
+            }
+            if (intento < reintentos) {
+                await esperar(esperaBaseMs * intento);
+            }
+        }
+        if (ultimoError) throw ultimoError;
+        return fetch(url, opciones);
+    }
 
     // Dominios o patrones de recursos (Genially, UVEG interactivo, etc.)
     const HOSTS_GENIALLY = ['view.genial.ly', 'view.genially.com', 'genial.ly', 'genially.com'];
@@ -715,16 +740,28 @@
 
     // --- RESOLUCIÓN PROFUNDA DE DESTINOS SCORM Y SALTOS A PDF (COMO L3_Comic.pdf) ---
 
-    function extraerRutaContent(texto) {
-        if (!texto) return null;
-        let limpio = String(texto).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+    function normalizarHtmlScorm(texto) {
+        if (!texto) return '';
+        let limpio = String(texto)
+            .replace(/\\u0026/gi, '&')
+            .replace(/\\u002f/gi, '/')
+            .replace(/\\x26/gi, '&')
+            .replace(/\\\//g, '/')
+            .replace(/\\"/g, '"')
+            .replace(/&amp;/gi, '&');
         try {
-            if (/%2F/i.test(limpio)) {
+            if (/%2F|%3A|%3F|%26/i.test(limpio)) {
                 limpio += ' ' + decodeURIComponent(limpio);
             }
         } catch {}
+        return limpio;
+    }
 
-        const match = limpio.match(/(https?:\/\/[^"'\s<>]+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+    function extraerRutaContent(texto) {
+        if (!texto) return null;
+        const limpio = normalizarHtmlScorm(texto);
+
+        const match = limpio.match(/(https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
         if (match) return match[1];
 
         const matchRel = limpio.match(/(\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
@@ -738,12 +775,7 @@
 
     function extraerUrlPdfDesdeTexto(texto, baseUrl = window.location.origin) {
         if (!texto) return null;
-        let limpio = String(texto).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
-        try {
-            if (/%2F/i.test(limpio)) {
-                limpio += ' ' + decodeURIComponent(limpio);
-            }
-        } catch {}
+        const limpio = normalizarHtmlScorm(texto);
 
         const matchAbs = limpio.match(/(https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?)/i);
         if (matchAbs) return matchAbs[1];
@@ -768,8 +800,8 @@
             }
         } catch {}
 
-        const limpio = String(html).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
-        const matchSco = limpio.match(/((?:https?:\/\/[^"'\s<>]+|[a-zA-Z0-9_./:-]*)\bloadSCO\.php\?[^"'\s<>]+)/i);
+        const limpio = normalizarHtmlScorm(html);
+        const matchSco = limpio.match(/((?:https?:\/\/[^"'\s<>\\]+|[a-zA-Z0-9_./:-]*)\bloadSCO\.php\?[^"'\s<>\\]+)/i);
         if (matchSco) {
             try {
                 return new URL(matchSco[1], baseUrl).href;
@@ -800,47 +832,68 @@
         }
 
         if (!html) return out;
-        const limpio = String(html).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+        const limpio = normalizarHtmlScorm(html);
 
         try {
             const doc = new DOMParser().parseFromString(html, 'text/html');
-            for (const input of doc.querySelectorAll('input[name], select[name]')) {
+            const formScope = doc.querySelector('form#scormviewform, form[action*="player.php"]') || doc;
+            for (const input of formScope.querySelectorAll('input[name], select[name]')) {
                 const name = (input.getAttribute('name') || '').toLowerCase();
                 const type = (input.getAttribute('type') || '').toLowerCase();
                 if ((type === 'radio' || type === 'checkbox') && !input.checked && !input.hasAttribute('checked')) continue;
                 const val = (input.value || input.getAttribute('value') || '').trim();
                 if (!val) continue;
-                if (name === 'cm' || name === 'id') out.cmId = out.cmId || val;
-                if (name === 'a') out.aId = out.aId || val;
-                if (name === 'scoid') out.scoid = out.scoid || val;
+                if ((name === 'cm' || name === 'id') && /^[1-9]\d*$/.test(val)) out.cmId = out.cmId || val;
+                if (name === 'a' && /^[1-9]\d*$/.test(val)) out.aId = out.aId || val;
+                if (name === 'scoid' && /^[1-9]\d*$/.test(val)) out.scoid = out.scoid || val;
                 if (name === 'currentorg') out.currentorg = out.currentorg || val;
                 if (name === 'mode') out.mode = out.mode || val;
                 if (name === 'attempt') out.attempt = out.attempt || val;
             }
         } catch {}
 
-        const mScoid = limpio.match(/[?&]scoid=(\d+)/i) || limpio.match(/["']scoid["']\s*[:=,]\s*["']?(\d+)/i);
+        // 1. Extraer combinación directa a=XXXX&scoid=YYYY (presente en player.php y en el JSON de M.mod_scorm.init)
+        const mCombo = limpio.match(/(?:^|[^a-zA-Z0-9_])a=([1-9]\d*)&scoid=([1-9]\d*)(?:&currentorg=([^&"'\s<>\\]*))?(?:&mode=([^&"'\s<>\\]*))?(?:&attempt=(\d+))?/i);
+        if (mCombo) {
+            out.aId = mCombo[1];
+            out.scoid = mCombo[2];
+            if (mCombo[3] && !out.currentorg) {
+                try { out.currentorg = decodeURIComponent(mCombo[3]); } catch { out.currentorg = mCombo[3]; }
+            }
+            if (mCombo[4] && !out.mode) out.mode = mCombo[4];
+            if (mCombo[5]) out.attempt = mCombo[5];
+        }
+
+        // 2. Respaldo individual de parámetros en URLs o JSON
+        const mScoid = limpio.match(/[?&]scoid=([1-9]\d*)/i) || limpio.match(/["']scoid["']\s*[:=,]\s*["']?([1-9]\d*)/i);
         if (mScoid && !out.scoid) out.scoid = mScoid[1];
 
-        const mCm = limpio.match(/[?&]cm=(\d+)/i);
+        const mCm = limpio.match(/[?&]cm=([1-9]\d*)/i);
         if (mCm && !out.cmId) out.cmId = mCm[1];
 
-        const mA = limpio.match(/[?&]a=(\d+)/i);
+        const mA = limpio.match(/(?:[?&]|["'])a=([1-9]\d*)(?:&|["'])/i);
         if (mA && !out.aId) out.aId = mA[1];
 
-        const mOrg = limpio.match(/[?&]currentorg=([^&"'\s<>]+)/i);
+        const mOrg = limpio.match(/[?&]currentorg=([^&"'\s<>\\]+)/i);
         if (mOrg && !out.currentorg) {
             try { out.currentorg = decodeURIComponent(mOrg[1]); } catch { out.currentorg = mOrg[1]; }
         }
 
-        const mInit = limpio.match(/M\.mod_scorm\.init\s*\(([\s\S]*?)\)/i);
-        if (mInit) {
-            const argsStr = mInit[1];
-            const mPar = argsStr.match(/["']?(\d+)["']?\s*,\s*["']?(\d+)["']?\s*,\s*["']([^"']*)["']/);
-            if (mPar) {
-                if (!out.aId) out.aId = mPar[1];
-                if (!out.scoid) out.scoid = mPar[2];
-                if (!out.currentorg && mPar[3]) out.currentorg = mPar[3];
+        // 3. Extraer desde M.mod_scorm.init(Y, ..., launch_sco, {TOC_JSON}, currentorg, aId, cmId, attempt, mode, ...)
+        const idxInit = limpio.search(/M\.mod_scorm\.init\s*\(/i);
+        if (idxInit !== -1) {
+            const argsStr = limpio.slice(idxInit, idxInit + 25000);
+            if (!out.scoid) {
+                const mLaunchSco = argsStr.match(/,\s*["']?([1-9]\d*)["']?\s*,\s*(?:\{\s*["']|null\b)/);
+                if (mLaunchSco) out.scoid = mLaunchSco[1];
+            }
+            if (out.cmId) {
+                const reBeforeCm = new RegExp('["\']([^"\']*)["\']\\s*,\\s*["\']?([1-9]\\d*)["\']?\\s*,\\s*["\']?' + out.cmId + '["\']?\\b');
+                const mBeforeCm = argsStr.match(reBeforeCm);
+                if (mBeforeCm) {
+                    if (!out.currentorg && mBeforeCm[1]) out.currentorg = mBeforeCm[1];
+                    if (!out.aId && mBeforeCm[2]) out.aId = mBeforeCm[2];
+                }
             }
         }
 
@@ -850,12 +903,13 @@
     async function probarLoadSco(urlSco) {
         if (!urlSco) return null;
         try {
-            const resSco = await fetch(urlSco, { credentials: 'include' });
+            const resSco = await fetchConReintento(urlSco, { credentials: 'include' }, 2, 400);
             if (esUrlPdfDirecto(resSco.url)) {
+                try { if (resSco.body) resSco.body.cancel(); } catch {}
                 return { tipo: 'pdf', url: resSco.url };
             }
             const desdeUrl = extraerRutaContent(resSco.url);
-            if (desdeUrl) return { tipo: 'scorm', url: desdeUrl };
+            if (desdeUrl) return { tipo: 'scorm', url: desdeUrl, launchUrl: resSco.url };
 
             if (resSco.ok) {
                 const cType = (resSco.headers.get('content-type') || '').toLowerCase();
@@ -896,30 +950,36 @@
         return null;
     }
 
-    async function resolverDestinoRecurso(url) {
+    async function resolverDestinoRecurso(url, opciones = {}) {
+        const descargarBlobPdf = Boolean(opciones.descargarBlobPdf);
+
         if (esUrlPdfDirecto(url)) {
             return { tipo: 'pdf', url: new URL(url, window.location.href).href };
         }
 
         const directo = extraerRutaContent(url);
-        if (directo) return { tipo: 'scorm', url: directo };
+        if (directo) return { tipo: 'scorm', url: directo, launchUrl: url };
 
         try {
             const uObj = new URL(url, window.location.href);
             const origin = uObj.origin;
             let estadoParams = extraerParametrosScorm('', uObj.href, {});
 
-            const resView = await fetch(uObj.href, { credentials: 'include' });
+            const resView = await fetchConReintento(uObj.href, { credentials: 'include' }, 3, 450);
             const baseActual = resView.url || uObj.href;
             const cTypeView = (resView.headers.get('content-type') || '').toLowerCase();
 
             if (esUrlPdfDirecto(baseActual) || cTypeView.includes('application/pdf')) {
-                const blobPdf = await resView.blob();
-                return { tipo: 'pdf', url: baseActual, blob: blobPdf };
+                if (descargarBlobPdf) {
+                    const blobPdf = await resView.blob();
+                    return { tipo: 'pdf', url: baseActual, blob: blobPdf };
+                }
+                try { if (resView.body) resView.body.cancel(); } catch {}
+                return { tipo: 'pdf', url: baseActual };
             }
 
             const desdeViewUrl = extraerRutaContent(baseActual);
-            if (desdeViewUrl) return { tipo: 'scorm', url: desdeViewUrl };
+            if (desdeViewUrl) return { tipo: 'scorm', url: desdeViewUrl, launchUrl: baseActual };
 
             if (!resView.ok) return null;
             const htmlView = await resView.text();
@@ -975,26 +1035,27 @@
 
             const intentosPlayer = [];
             if (Array.from(formParams.keys()).length > 0) {
-                intentosPlayer.push(() => fetch(urlPlayer, {
+                intentosPlayer.push(() => fetchConReintento(urlPlayer, {
                     method: 'POST',
                     credentials: 'include',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: formParams.toString()
-                }));
+                }, 2, 450));
             }
 
             const sep = urlPlayer.includes('?') ? '&' : '?';
             const urlPlayerGet = Array.from(formParams.keys()).length > 0 ? `${urlPlayer}${sep}${formParams.toString()}` : urlPlayer;
-            intentosPlayer.push(() => fetch(urlPlayerGet, { credentials: 'include' }));
+            intentosPlayer.push(() => fetchConReintento(urlPlayerGet, { credentials: 'include' }, 2, 450));
 
             for (const ejecutarFetchPlayer of intentosPlayer) {
                 try {
                     const resPlayer = await ejecutarFetchPlayer();
                     if (esUrlPdfDirecto(resPlayer.url)) {
+                        try { if (resPlayer.body) resPlayer.body.cancel(); } catch {}
                         return { tipo: 'pdf', url: resPlayer.url };
                     }
                     const desdePlayerUrl = extraerRutaContent(resPlayer.url);
-                    if (desdePlayerUrl) return { tipo: 'scorm', url: desdePlayerUrl };
+                    if (desdePlayerUrl) return { tipo: 'scorm', url: desdePlayerUrl, launchUrl: resPlayer.url };
 
                     if (resPlayer.ok) {
                         const htmlPlayer = await resPlayer.text();
@@ -1029,22 +1090,28 @@
 
     async function validarItemsModResource(lista) {
         const resultado = [];
+        const mapaPLeccion = cargarMapaPLeccion(obtenerIdCurso());
         for (const item of lista) {
             if (!item.requiereValidarSaltoPdf) {
                 resultado.push(item);
                 continue;
             }
             try {
-                const destino = await resolverDestinoRecurso(item.url);
+                const destino = await resolverDestinoRecurso(item.url, { descargarBlobPdf: false });
                 if (destino && destino.tipo === 'pdf') {
                     const nomPdf = extraerNombreArchivoPdf(destino.url) || '';
                     if (REGEX_CODIGO_LECCION.test(nomPdf)) {
-                        const tituloPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                        const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                        const numPdf = extraerNumeroLeccion(codigoPdf) ?? item.numero ?? 999;
+                        const tituloVisual = (numPdf !== null && numPdf !== 999 && mapaPLeccion[String(numPdf)])
+                            ? mapaPLeccion[String(numPdf)]
+                            : codigoPdf;
                         resultado.push({
-                            titulo: tituloPdf,
+                            codigo: codigoPdf,
+                            titulo: tituloVisual,
                             url: destino.url,
                             tipo: 'pdf',
-                            numero: extraerNumeroLeccion(tituloPdf) ?? 999
+                            numero: numPdf
                         });
                     }
                 }
@@ -1053,7 +1120,7 @@
         return resultado;
     }
 
-    // Recorrido interno en paralelo de las secciones 2, 3 y 4 del curso
+    // Recorrido secuencial con reintento de las secciones 2, 3 y 4 del curso (evita bloqueo de sesión PHP en Moodle)
     async function escanearTodasLasSecciones(courseId) {
         if (escaneandoSecciones || !courseId || hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
             return;
@@ -1071,12 +1138,12 @@
         // Mostrar estado de carga limpio
         renderizarEstadoCarga();
 
-        // Peticiones en paralelo con Promise.allSettled
-        await Promise.allSettled(secciones.map(async (sec) => {
+        // Peticiones secuenciales con reintento para evitar colisión de MoodleSession
+        for (const sec of secciones) {
             try {
                 const urlSec = `${window.location.origin}/course/view.php?id=${courseId}&mainsection=${sec}`;
-                const respuesta = await fetch(urlSec, { credentials: 'include' });
-                if (!respuesta.ok) return;
+                const respuesta = await fetchConReintento(urlSec, { credentials: 'include' }, 3, 500);
+                if (!respuesta.ok) continue;
 
                 const html = await respuesta.text();
                 const parser = new DOMParser();
@@ -1092,9 +1159,9 @@
                     }
                 }
             } catch (err) {
-                console.warn('[UVEG Extensión] Error al obtener recurso', err);
+                console.warn(`[UVEG Extensión] Error al obtener sección ${sec}:`, err);
             }
-        }));
+        }
 
         // Filtrar cualquier item local pendiente de validación de salto PDF
         itemsAcumulados = await validarItemsModResource(itemsAcumulados);
@@ -1746,32 +1813,43 @@
         setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
     }
 
+    function limpiarRutaManifest(rutaRaw) {
+        if (!rutaRaw) return '';
+        return String(rutaRaw)
+            .trim()
+            .replace(/&amp;/gi, '&')
+            .replace(/\\/g, '/')
+            .replace(/^(\.\/|\/)+/, '');
+    }
+
     async function descargarLeccionScormOPdf(item, btnElement) {
         if (!btnElement || btnElement.classList.contains('descargando')) return;
 
+        descargasActivas++;
         btnElement.classList.add('descargando');
         btnElement.innerHTML = `<span>Buscando...</span>`;
 
         try {
-            const destino = await resolverDestinoRecurso(item.url);
+            const destino = await resolverDestinoRecurso(item.url, { descargarBlobPdf: true });
             if (!destino) {
                 throw new Error('No se pudo localizar el paquete SCORM o PDF');
             }
 
-            const slug = (item.titulo || 'leccion')
+            const baseNombre = item.codigo || item.titulo || 'leccion';
+            const slug = baseNombre
                 .normalize('NFD')
                 .replace(/[\u0300-\u036f]/g, '')
                 .replace(/[^a-zA-Z0-9_-]/g, '_')
                 .replace(/_+/g, '_')
                 .replace(/^_|_$/g, '')
-                .substring(0, 50);
+                .substring(0, 50) || 'leccion';
 
             // Caso 1: El recurso es un PDF directo o dio un salto hacia un PDF (ej. L3_Comic.pdf)
             if (destino.tipo === 'pdf') {
                 btnElement.innerHTML = `<span>Descargando PDF...</span>`;
                 let blobPdf = destino.blob;
                 if (!blobPdf) {
-                    const resPdf = await fetch(destino.url, { credentials: 'include' });
+                    const resPdf = await fetchConReintento(destino.url, { credentials: 'include' }, 3, 500);
                     if (!resPdf.ok) throw new Error('Error al descargar PDF (' + resPdf.status + ')');
                     blobPdf = await resPdf.blob();
                 }
@@ -1791,48 +1869,65 @@
             }
 
             // Caso 2: El recurso es un paquete SCORM interactivo
-            const baseScorm = destino.url;
+            const baseScorm = destino.url.endsWith('/') ? destino.url : (destino.url + '/');
             btnElement.innerHTML = `<span>Leyendo...</span>`;
-            const manifestRes = await fetch(baseScorm + 'imsmanifest.xml', { credentials: 'include' });
-            if (!manifestRes.ok) throw new Error('Error al leer imsmanifest.xml (' + manifestRes.status + ')');
-            const manifestXml = await manifestRes.text();
 
             const listaArchivos = new Set();
-            listaArchivos.add('imsmanifest.xml');
             listaArchivos.add('story.html');
             listaArchivos.add('index.html');
+            listaArchivos.add('index_lms.html');
 
-            let m;
-            const fileRegex = /<file\b[^>]*\bhref=["']([^"']+)["']/gi;
-            while ((m = fileRegex.exec(manifestXml)) !== null) {
-                if (m[1]) listaArchivos.add(m[1].trim());
+            if (destino.launchUrl && destino.launchUrl.startsWith(baseScorm)) {
+                const relLaunch = limpiarRutaManifest(destino.launchUrl.slice(baseScorm.length).split('?')[0]);
+                if (relLaunch) listaArchivos.add(relLaunch);
             }
 
-            const resRegex = /<resource\b[^>]*\bhref=["']([^"']+)["']/gi;
-            while ((m = resRegex.exec(manifestXml)) !== null) {
-                if (m[1]) listaArchivos.add(m[1].trim());
+            try {
+                const manifestRes = await fetchConReintento(baseScorm + 'imsmanifest.xml', { credentials: 'include' }, 3, 450);
+                if (manifestRes.ok) {
+                    const manifestXml = await manifestRes.text();
+                    listaArchivos.add('imsmanifest.xml');
+
+                    let m;
+                    const fileRegex = /<file\b[^>]*\bhref=["']([^"']+)["']/gi;
+                    while ((m = fileRegex.exec(manifestXml)) !== null) {
+                        const r = limpiarRutaManifest(m[1]);
+                        if (r) listaArchivos.add(r);
+                    }
+
+                    const resRegex = /<resource\b[^>]*\bhref=["']([^"']+)["']/gi;
+                    while ((m = resRegex.exec(manifestXml)) !== null) {
+                        const r = limpiarRutaManifest(m[1]);
+                        if (r) listaArchivos.add(r);
+                    }
+                }
+            } catch (eManifest) {
+                console.warn('[UVEG Bloc Notas] No se pudo leer imsmanifest.xml, usando archivos de entrada:', eManifest);
             }
 
             const arrayArchivos = Array.from(listaArchivos);
             const zip = new VanillaZipEngine();
             const pdfsInternos = new Set();
             let completados = 0;
+            let archivosAgregados = 0;
 
-            const BATCH_SIZE = 8;
+            const BATCH_SIZE = 5;
             for (let i = 0; i < arrayArchivos.length; i += BATCH_SIZE) {
                 const lote = arrayArchivos.slice(i, i + BATCH_SIZE);
                 await Promise.all(lote.map(async (ruta) => {
                     try {
-                        const res = await fetch(baseScorm + ruta, { credentials: 'include' });
+                        const urlArchivo = new URL(ruta, baseScorm).href;
+                        const res = await fetchConReintento(urlArchivo, { credentials: 'include' }, 3, 400);
                         if (res.ok) {
                             const buf = await res.arrayBuffer();
                             const uint8 = new Uint8Array(buf);
                             zip.add(ruta, uint8);
+                            archivosAgregados++;
 
                             // Si el archivo dentro del SCORM tiene un salto a un PDF de UVEG (como L3_Comic.pdf), detectarlo para descargarlo también
                             if (/\.(js|html|htm|xml|json)$/i.test(ruta)) {
                                 try {
-                                    const texto = new TextDecoder('utf-8').decode(uint8).replace(/\\\//g, '/');
+                                    const texto = normalizarHtmlScorm(new TextDecoder('utf-8').decode(uint8));
                                     const regexPdf = /https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?/gi;
                                     let mPdf;
                                     while ((mPdf = regexPdf.exec(texto)) !== null) {
@@ -1840,23 +1935,29 @@
                                     }
                                 } catch {}
                             }
-
-                            completados++;
-                            const pct = Math.round((completados / arrayArchivos.length) * 100);
-                            btnElement.innerHTML = `<span>${pct}%</span>`;
                         }
-                    } catch {}
+                    } catch {} finally {
+                        completados++;
+                        const pct = Math.min(99, Math.round((completados / arrayArchivos.length) * 100));
+                        btnElement.innerHTML = `<span>${pct}%</span>`;
+                    }
                 }));
             }
 
-            btnElement.innerHTML = `<span>Empacando...</span>`;
-            const blobZip = zip.buildBlob();
-            dispararDescargaNavegador(blobZip, `Leccion_${slug}_Offline.zip`);
+            if (archivosAgregados === 0 && pdfsInternos.size === 0) {
+                throw new Error('No se pudieron descargar los archivos del paquete SCORM');
+            }
+
+            if (archivosAgregados > 0) {
+                btnElement.innerHTML = `<span>Empacando...</span>`;
+                const blobZip = zip.buildBlob();
+                dispararDescargaNavegador(blobZip, `Leccion_${slug}_Offline.zip`);
+            }
 
             // Si el SCORM tenía un salto interno a un PDF (como L3_Comic.pdf), descargarlo también automáticamente
             for (const urlPdfExtra of pdfsInternos) {
                 try {
-                    const resExtra = await fetch(urlPdfExtra, { credentials: 'include' });
+                    const resExtra = await fetchConReintento(urlPdfExtra, { credentials: 'include' }, 3, 450);
                     if (resExtra.ok) {
                         const blobExtra = await resExtra.blob();
                         const nomExtra = extraerNombreArchivoPdf(urlPdfExtra) || `${slug}_Anexo.pdf`;
@@ -1881,6 +1982,8 @@
             setTimeout(() => {
                 btnElement.innerHTML = `${SVG_DESCARGAR}<span>Descargar</span>`;
             }, 3000);
+        } finally {
+            descargasActivas = Math.max(0, descargasActivas - 1);
         }
     }
 
@@ -2088,6 +2191,11 @@
     }
 
     function actualizar() {
+        // Evitar que el MutationObserver destruya el botón mientras hay una descarga activa
+        if (descargasActivas > 0) {
+            return;
+        }
+
         const urlActual = window.location.href;
         const courseId = obtenerIdCurso();
 
@@ -2115,9 +2223,9 @@
 
         const itemsDom = encontrarIframesEnDocumento(document);
 
-        // Incorporar items del DOM actual (excepto mod/resource pendientes de validar si ya se escaneó el curso)
+        // Incorporar items del DOM actual (excepto mod/resource sin validar cuando estamos en página de curso)
         for (const item of itemsDom) {
-            if (item.requiereValidarSaltoPdf && ultimoCursoEscaneado === courseId) {
+            if (item.requiereValidarSaltoPdf && (esPaginaCurso() || ultimoCursoEscaneado === courseId)) {
                 continue;
             }
             const norm = normalizarUrl(item.url);

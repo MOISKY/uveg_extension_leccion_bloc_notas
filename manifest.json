@@ -15,9 +15,15 @@
             "128": "img/icon-128.png"
         }
     },
+    "host_permissions": [
+        "https://*.uveg.edu.mx/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+    ],
     "content_scripts": [
         {
             "matches": [
+                "https://*.uveg.edu.mx/*",
                 "https://avalicmod19d.uveg.edu.mx/*",
                 "http://localhost/*",
                 "http://127.0.0.1/*"
